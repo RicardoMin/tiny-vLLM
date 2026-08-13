@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+.venv-*/
+
+# Machine-local state
+.local/
+.cache/
+.env
+.env.*
+!.env.example
+
+# Models
+models/
+checkpoints/
+*.safetensors
+
+# Reference repositories are identified by their own commit SHA
+references/
+
+# Large profiler artifacts
+*.nsys-rep
+*.qdrep
+*.sqlite
+*.pt.trace.json
+torch_compile_debug/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
