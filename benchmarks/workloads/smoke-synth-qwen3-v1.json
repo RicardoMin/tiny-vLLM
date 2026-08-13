@@ -1,0 +1,32 @@
+{
+  "arrival": {
+    "clock": "monotonic_ns_relative",
+    "origin": "runner_start",
+    "sorted": true
+  },
+  "eos_token_ids": [
+    151645
+  ],
+  "model_id": "Qwen/Qwen3-0.6B",
+  "record_count": 8,
+  "records_file": "smoke-synth-qwen3-v1.jsonl",
+  "records_sha256": "b6490978bae086647778be7124b2050030562d7cb6c5cafb49b4dde622c0dc9a",
+  "sampling": {
+    "ignore_eos": true,
+    "temperature": 0.6
+  },
+  "schema_version": "tinyvllm.workload.v1",
+  "source": {
+    "kind": "synthetic_uniform",
+    "seed": 0,
+    "token_max_exclusive": 10000,
+    "token_min_inclusive": 0
+  },
+  "suite": "smoke",
+  "totals": {
+    "prompt_tokens": 128,
+    "requested_output_tokens": 64
+  },
+  "vocab_size": 151936,
+  "workload_id": "smoke-synth-qwen3-v1"
+}
