@@ -1,6 +1,6 @@
 import pytest
 
-from tinyvllm import RequestStatus, SamplingParams, WorkClass
+from tinyvllm import RequestStatus, SamplingParams, WorkClass, RequestState
 
 
 def test_sampling_modes() -> None:
@@ -32,3 +32,83 @@ def test_request_enums() -> None:
     assert RequestStatus.ABORTED.terminal
     assert not RequestStatus.RUNNING.terminal
     assert WorkClass.PREFILL is not WorkClass.DECODE
+
+
+def make_request(prompt: list[int] | None = None) -> RequestState:
+    return RequestState(
+        request_id=7,
+        submit_seq=3,
+        prompt_token_ids=[11, 12, 13] if prompt is None else prompt,
+        sampling=SamplingParams(max_new_tokens=4),
+        arrival_ns=100,
+    )
+
+
+def test_initial_request_is_pending_prefill() -> None:
+    request = make_request()
+
+    print('pass')
+    assert request.status is RequestStatus.PENDING
+    assert request.work_class is WorkClass.PREFILL
+    assert request.computed_tokens == 0
+    assert request.num_uncomputed_tokens == 3
+    assert request.remaining_new_tokens == 4
+    assert request.token_slice(0, 2) == [11, 12]
+
+
+def test_partial_prefill() -> None:
+    request = make_request()
+    request.status = RequestStatus.RUNNING
+    request.active_slot = 0
+    request.admitted_ns = 110
+    request.computed_tokens = 2
+
+    request.check_committed_invariants()
+
+    assert request.work_class is WorkClass.PREFILL
+    assert request.num_uncomputed_tokens == 1
+
+
+def test_steady_decode() -> None:
+    request = make_request()
+    request.status = RequestStatus.RUNNING
+    request.active_slot = 0
+    request.admitted_ns = 110
+    request.computed_tokens = 3
+    request.output_token_ids.append(42)
+    request.first_token_ns = 120
+    request.work_class = WorkClass.DECODE
+
+    request.check_committed_invariants()
+
+    assert request.computed_tokens + 1 == request.total_tokens
+    assert request.token_slice(3, 4) == [42]
+
+
+def test_recompute_preemption() -> None:
+    request = make_request()
+    request.status = RequestStatus.WAITING
+    request.admitted_ns = 110
+    request.output_token_ids.append(42)
+    request.first_token_ns = 120
+    request.preemption_count = 1
+
+    request.check_committed_invariants()
+
+    assert request.computed_tokens == 0
+    assert request.work_class is WorkClass.PREFILL
+    assert request.context_token_ids == [11, 12, 13, 42]
+
+
+def test_future_request_can_be_aborted_before_arrival() -> None:
+    request = RequestState(
+        request_id=1,
+        submit_seq=1,
+        prompt_token_ids=[11],
+        sampling=SamplingParams(),
+        arrival_ns=100,
+        status=RequestStatus.ABORTED,
+        finished_ns=50,
+    )
+
+    assert request.terminal
