@@ -47,7 +47,6 @@ def make_request(prompt: list[int] | None = None) -> RequestState:
 def test_initial_request_is_pending_prefill() -> None:
     request = make_request()
 
-    print('pass')
     assert request.status is RequestStatus.PENDING
     assert request.work_class is WorkClass.PREFILL
     assert request.computed_tokens == 0
