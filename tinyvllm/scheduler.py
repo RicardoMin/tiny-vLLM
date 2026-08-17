@@ -9,18 +9,10 @@ from tinyvllm.request import (
     WorkClass,
 )
 
-
-def _check_non_negative_int(name: str, value: int) -> None:
-    if type(value) is not int:
-        raise TypeError(f"{name} must be an integer")
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-
-
-def _check_positive_int(name: str, value: int) -> None:
-    _check_non_negative_int(name, value)
-    if value == 0:
-        raise ValueError(f"{name} must be positive")
+from tinyvllm._validation import (
+    _check_non_negative_int,
+    _check_positive_int,
+)
 
 
 @dataclass(frozen=True, slots=True)

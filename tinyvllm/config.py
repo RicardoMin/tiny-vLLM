@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from tinyvllm._validation import _check_positive_int
+
 
 DType = Literal["bfloat16", "float16"]
 
@@ -34,8 +36,7 @@ class EngineConfig:
             "max_num_batched_tokens",
             "prefill_chunk_size",
         ):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
+            _check_positive_int(name, getattr(self, name))
 
         if not 0.0 < self.gpu_memory_utilization < 1.0:
             raise ValueError("gpu_memory utilization must be between 0 and 1")

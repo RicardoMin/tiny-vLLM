@@ -10,18 +10,10 @@ from tinyvllm.request import (
     WorkClass,
 )
 
-
-def _check_positive_int(name: str, value: int) -> None:
-    _check_non_negative_int(name, value)
-    if value == 0:
-        raise ValueError(f"{name} must be positive")
-
-
-def _check_non_negative_int(name: str, value: int) -> None:
-    if type(value) is not int:
-        raise TypeError(f"{name} must be an integer")
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
+from tinyvllm._validation import (
+    _check_non_negative_int,
+    _check_positive_int,
+)
 
 
 class StepMode(Enum):
@@ -160,7 +152,7 @@ class PreparedBatch:
     sample_request_ids: tuple[int, ...]
     sampling_params: tuple[SamplingParams, ...]
 
-    def __post_int__(self) -> None:
+    def __post_init__(self) -> None:
         _check_non_negative_int("plan_id", self.plan_id)
         _check_non_negative_int(
             "num_decode_items",
@@ -191,7 +183,7 @@ class PreparedBatch:
         num_items = len(self.query_lens)
         if num_items == 0:
             raise ValueError(
-                "PrepareBatch must contain at least one item"
+                "PreparedBatch must contain at least one item"
             )
         if self.num_decode_items > num_items:
             raise ValueError(
@@ -253,9 +245,9 @@ class PreparedBatch:
         if self.num_decode_items == 0:
             expected_mode = StepMode.PREFILL_ONLY
         elif self.num_decode_items == num_items:
-            expected_mdoe = StepMode.DECODE_ONLY
+            expected_mode = StepMode.DECODE_ONLY
         else:
-            expected_mdoe = StepMode.MIXED
+            expected_mode = StepMode.MIXED
 
         if self.mode is not expected_mode:
             raise ValueError(
@@ -368,7 +360,7 @@ class BatchBuilder:
                 )
             if request.inflight_plan_id is not None:
                 raise ValueError(
-                    "plan contains an infliaght request"
+                    "plan contains an inflight request"
                 )
             if request.computed_tokens != item.token_start:
                 raise ValueError(

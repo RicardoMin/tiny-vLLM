@@ -4,16 +4,11 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
-
-def _check_non_negative_int(name: str, value: int) -> None:
-    if type(value) is not int:
-        raise TypeError(f"{name} must be an integer")
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-
-
-def _check_token_id(token_id: int) -> None:
-    _check_non_negative_int("token_id", token_id)
+from tinyvllm._validation import (
+    _check_non_negative_int,
+    _check_optional_non_negative_int,
+    _check_token_id,
+)
 
 
 class RequestStatus(Enum):
@@ -176,13 +171,16 @@ class RequestState:
         if self.num_output_tokens > self.sampling.max_new_tokens:
             raise ValueError("output exceeds max_new_tokens")
 
-        self._check_optional_index("active_slot", self.active_slot)
-        self._check_optional_index(
+        _check_optional_non_negative_int(
+            "active_slot",
+            self.active_slot,
+        )
+        _check_optional_non_negative_int(
             "inflight_plan_id", self.inflight_plan_id
         )
 
         for name in ("admitted_ns", "first_token_ns", "finished_ns"):
-            self._check_optional_timestamp(name, getattr(self, name))
+            _check_optional_non_negative_int(name, getattr(self, name))
 
         if self.status is RequestStatus.RUNNING:
             if self.active_slot is None:
@@ -263,21 +261,3 @@ class RequestState:
                     raise ValueError(
                         "decode request must have exactly one pending token"
                     )
-
-
-    @staticmethod
-    def _check_optional_index(
-        name: str,
-        value: int | None,
-    ) -> None:
-        if value is not None:
-            _check_non_negative_int(name, value)
-
-
-    @staticmethod
-    def _check_optional_timestamp(
-        name: str,
-        value: int | None,
-    ) -> None:
-        if value is not None:
-            _check_non_negative_int(name, value)
