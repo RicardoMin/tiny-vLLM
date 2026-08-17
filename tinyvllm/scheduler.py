@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -120,11 +121,15 @@ class Scheduler:
         self.prefill_chunk_size = prefill_chunk_size
         
         self._requests: dict[int, RequestState] = {}
-        self._waiting_ids: list[int] = []
+        self._waiting_ids: deque[int] = deque()
+        self._slot_request_ids: list[int | None] = (
+            [None] * max_active_requests
+        )
         self._immediate_finished_ids: list[int] = []
 
         self._last_command_seq = -1
         self._now_ns: int | None = None
+        self._command_cutoff_ready = False
         self._next_plan_id = 0
         self._open_txn: ScheduleTxn | None = None
 
@@ -218,6 +223,7 @@ class Scheduler:
 
         self._now_ns = now_ns
         self._promote_arrivals(now_ns)
+        self._command_cutoff_ready = True
 
 
     def begin_step(self, now_ns: int) -> ScheduleTxn | None:
@@ -227,7 +233,11 @@ class Scheduler:
             raise RuntimeError(
                 "a scheduling transaction is already open"
             )
-        if self._now_ns is None or now_ns != self._now_ns:
+        if (
+            not self._command_cutoff_ready
+            or self._now_ns is None
+            or now_ns != self._now_ns
+        ):
             raise ValueError(
                 "apply_commands must run first with the same now_ns"
             )
@@ -301,37 +311,173 @@ class Scheduler:
         return txn
 
 
-    def rollback(self, txn: ScheduleTxn) -> None:
-        if txn is not self._open_txn:
-            raise ValueError(
-                "transaction is not the scheduler's open transaction"
+    def mark_dispatched(
+        self,
+        txn: ScheduleTxn,
+        now_ns: int,
+    ) -> None:
+        """Publish runtime ownership immediately before execution."""
+        self._require_open_txn(txn, TxnState.PREPARED)
+        if not self._command_cutoff_ready:
+            raise RuntimeError("no command cutoff is ready")
+
+        self._check_now(now_ns)
+
+        admission_slots: dict[int, int] = {}
+        for admission in txn.admissions:
+            if not isinstance(admission, StagedAdmission):
+                raise TypeError(
+                    "admission must contain StagedAdmission values"
+                )
+            if admission.request_id in admission_slots:
+                raise RuntimeError(
+                    "transaction contains duplicate admissions"
+                )
+            admission_slots[admission.request_id] = (
+                admission.request_slot
             )
-        if txn.state is not TxnState.PREPARED:
+
+        if len(self._waiting_ids) < len(txn.admissions):
             raise RuntimeError(
-                "only a prepared transaction can roll back"
+                "admission no longer match the waiting queue"
             )
+
+        for waiting_id, admission in zip(
+            self._waiting_ids,
+            txn.admissions,
+        ):
+            if waiting_id != admission.request_id:
+                raise RuntimeError(
+                    "admission no longer match the waiting queue head"
+                )
+
+        plan_items = {
+            item.request_id: item
+            for item in txn.plan.items
+        }
+
+        for admission in txn.admissions:
+            item = plan_items.get(admission.request_id)
+            if (
+                item is None
+                or item.request_slot != admission.request_slot
+            ):
+                raise RuntimeError(
+                    "admission does not match the step plan"
+                )
+
+        # Validate the complete plan before publishing any mutation.
+        validated: list[tuple[RequestState, int | None]] = []
+
+        for item in txn.plan.items:
+            request = self._requests.get(item.request_id)
+            if request is None:
+                raise RuntimeError(
+                    "plan refers to an unknown request"
+                )
+            if item.request_slot >= self.max_active_requests:
+                raise RuntimeError(
+                    "planned request slot is out of range"
+                )
+            if request.inflight_plan_id is not None:
+                raise RuntimeError(
+                    "planned request is already inflight"
+                )
+            if request.work_class is not item.work_class:
+                raise RuntimeError(
+                    "request work class no longer matches the plan"
+                )
+            if (
+                request.computed_tokens != item.token_start
+                or item.context_len_before != request.computed_tokens
+            ):
+                raise RuntimeError(
+                    "request progress no longer matches the plan"
+                )
+
+            admission_slot = admission_slots.get(item.request_id)
+
+            if admission_slot is not None:
+                if request.status is not RequestStatus.WAITING:
+                    raise RuntimeError(
+                        "admitted request is not waiting"
+                    )
+                if request.active_slot is not None:
+                    raise RuntimeError(
+                        "admitted request already owns a slot"
+                    )
+                if self._slot_request_ids[item.request_slot] is not None:
+                    raise RuntimeError(
+                        "admission request slot is not free"
+                    )
+            else:
+                if request.status is not RequestStatus.RUNNING:
+                    raise RuntimeError(
+                        "non-admitted plan item is not running"
+                    )
+                if request.active_slot != item.request_slot:
+                    raise RuntimeError(
+                        "running request slot no longer matches the plan"
+                    )
+                if (
+                    self._slot_request_ids[item.request_slot]
+                    != request.request_id
+                ):
+                    raise RuntimeError(
+                        "running request does not own its slot"
+                    )
+
+            validated.append((request, admission_slot))
+
+        # Publication starts here. Everything above must remain mutation-free.
+        for _ in txn.admissions:
+            self._waiting_ids.popleft()
+
+        for request, admission_slot in validated:
+            if admission_slot is not None:
+                request.status = RequestStatus.RUNNING
+                request.active_slot = admission_slot
+                self._slot_request_ids[admission_slot] = (
+                    request.request_id
+                )
+
+                if request.admitted_ns is None:
+                    request.admitted_ns = now_ns
+
+            request.inflight_plan_id = txn.plan.plan_id
+
+        self._now_ns = now_ns
+        self._command_cutoff_ready = False
+        txn.state = TxnState.DISPATCHED
+
+
+    def rollback(self, txn: ScheduleTxn) -> None:
+        self._require_open_txn(txn, TxnState.PREPARED)
 
         txn.state = TxnState.ROLLED_BACK
         self._open_txn = None
 
+
+    def _require_open_txn(
+        self,
+        txn: ScheduleTxn,
+        expected_state: TxnState,
+    ) -> None:
+        if txn is not self._open_txn:
+            raise ValueError(
+                "transaction is not the scheduler's open transaction"
+            )
+        if txn.state is not expected_state:
+            raise RuntimeError(
+                f"transaction must be {expected_state.name.lower()}"
+            )
+
     def _free_slots(self) -> list[int]:
-        used_slots: set[int] = set()
-
-        for request in self._requests.values():
-            if request.active_slot is None:
-                continue
-            if request.active_slot >= self.max_active_requests:
-                raise RuntimeError(
-                    "request owns an out-of-range active slot"
-                )
-            if request.active_slot in used_slots:
-                raise RuntimeError(
-                    "multiple requests own the same active slot"
-                )
-            used_slots.add(request.active_slot)
-
-        return [slot for slot in range(self.max_active_requests)
-                if slot not in used_slots]
+        return [
+            slot 
+            for slot, request_id in enumerate(self._slot_request_ids)
+            if request_id is None
+        ]
 
 
     def _promote_arrivals(self, now_ns: int) -> None:

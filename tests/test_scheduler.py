@@ -5,6 +5,7 @@ import copy
 
 from tinyvllm.request import RequestStatus, SamplingParams
 from tinyvllm.scheduler import AddCommand, Scheduler, TxnState
+from tinyvllm.batch import BatchBuilder
 
 
 def command(
@@ -286,3 +287,88 @@ def test_begin_step_requires_same_command_cutoff_time() -> None:
 
     with pytest.raises(ValueError, match="same now_ns"):
         scheduler.begin_step(now_ns=11)
+
+
+def test_mark_dispatched_publishes_runtime_ownership() -> None:
+    scheduler = make_scheduler(active=2)
+    scheduler.apply_commands(
+        (
+            command(0, 10),
+            command(1, 11),
+            command(2, 12),
+            command(3, 13, arrival_ns=11),
+        ),
+        now_ns=10,
+    )
+    txn = scheduler.begin_step(now_ns=10)
+    assert txn is not None
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        txn.plan,
+        tuple(
+            scheduler.get_request(item.request_id)
+            for item in txn.plan.items
+        ),
+    )
+    assert batch.plan_id == txn.plan.plan_id
+
+    scheduler.mark_dispatched(txn, now_ns=12)
+
+    assert txn.state is TxnState.DISPATCHED
+    assert scheduler.has_open_transaction
+    assert scheduler.waiting_request_ids == (12,)
+    assert (
+        scheduler.get_request(13).status
+        is RequestStatus.PENDING
+    )
+
+    for request_id, slot in ((10, 0), (11, 1)):
+        request = scheduler.get_request(request_id)
+        assert request.status is RequestStatus.RUNNING
+        assert request.active_slot == slot
+        assert request.admitted_ns == 12
+        assert request.inflight_plan_id == txn.plan.plan_id
+        assert request.computed_tokens == 0
+        assert request.output_token_ids == []
+
+
+def test_dispatch_prevalidation_is_atomic() -> None:
+    scheduler = make_scheduler(active=2)
+    scheduler.apply_commands(
+        (command(0, 10), command(1, 11)),
+        now_ns=10,
+    )
+    txn = scheduler.begin_step(now_ns=10)
+    assert txn is not None
+
+    scheduler.get_request(11).inflight_plan_id = 999
+    before = committed_state(scheduler)
+
+    with pytest.raises(RuntimeError, match="already inflight"):
+        scheduler.mark_dispatched(txn, now_ns=12)
+
+    assert committed_state(scheduler) == before
+    assert txn.state is TxnState.PREPARED
+
+    scheduler.get_request(11).inflight_plan_id = None
+    scheduler.mark_dispatched(txn, now_ns=12)
+    assert scheduler.get_request(10).admitted_ns == 12
+
+
+def test_dispatched_transaction_cannot_roll_back() -> None:
+    scheduler = make_scheduler()
+    scheduler.apply_commands((command(0, 10),), now_ns=0)
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+
+    scheduler.mark_dispatched(txn, now_ns=1)
+
+    with pytest.raises(RuntimeError, match="must be prepared"):
+        scheduler.rollback(txn)
+
+    assert txn.state is TxnState.DISPATCHED
+    assert scheduler.has_open_transaction
+    assert (
+        scheduler.get_request(10).inflight_plan_id
+        == txn.plan.plan_id
+    )
