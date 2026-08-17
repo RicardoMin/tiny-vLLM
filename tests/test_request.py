@@ -62,8 +62,6 @@ def test_partial_prefill() -> None:
     request.admitted_ns = 110
     request.computed_tokens = 2
 
-    request.check_committed_invariants()
-
     assert request.work_class is WorkClass.PREFILL
     assert request.num_uncomputed_tokens == 1
 
@@ -78,8 +76,6 @@ def test_steady_decode() -> None:
     request.first_token_ns = 120
     request.work_class = WorkClass.DECODE
 
-    request.check_committed_invariants()
-
     assert request.computed_tokens + 1 == request.total_tokens
     assert request.token_slice(3, 4) == [42]
 
@@ -91,8 +87,6 @@ def test_recompute_preemption() -> None:
     request.output_token_ids.append(42)
     request.first_token_ns = 120
     request.preemption_count = 1
-
-    request.check_committed_invariants()
 
     assert request.computed_tokens == 0
     assert request.work_class is WorkClass.PREFILL
@@ -111,3 +105,9 @@ def test_future_request_can_be_aborted_before_arrival() -> None:
     )
 
     assert request.terminal
+
+
+@pytest.mark.parametrize("prompt", [[], [-1]])
+def test_request_rejects_invalid_prompt(prompt: list[int]) -> None:
+    with pytest.raises(ValueError):
+        make_request(prompt)

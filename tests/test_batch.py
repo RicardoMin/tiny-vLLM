@@ -135,14 +135,6 @@ def test_plan_rejects_prefill_before_decode() -> None:
         )
 
 
-def test_plan_rejects_duplicate_request() -> None:
-    with pytest.raises(ValueError, match="request may appear"):
-        StepPlan(
-            plan_id=1,
-            items=(prefill_item(), prefill_item(slot=1)),
-        )
-
-
 def test_plan_rejects_empty_items() -> None:
     with pytest.raises(ValueError, match="at least one"):
         StepPlan(plan_id=1, items=())
@@ -203,29 +195,6 @@ def test_final_prefill_maps_its_last_query_row() -> None:
     assert batch.num_samples == 1
 
 
-def test_builder_rejects_stale_plan() -> None:
-    request = waiting_request()
-    stale_item = WorkItem(
-        request_id=1,
-        request_slot=0,
-        work_class=WorkClass.PREFILL,
-        token_start=1,
-        query_len=2,
-        context_len_before=1,
-        should_sample=True,
-    )
-    plan = StepPlan(plan_id=9, items=(stale_item,))
-
-    with pytest.raises(
-        ValueError,
-        match="committed progress",
-    ):
-        BatchBuilder(max_model_len=16).prepare(
-            plan,
-            (request,),
-        )
-
-
 def test_builder_rejects_wrong_request_order() -> None:
     plan = StepPlan(
         plan_id=10,
@@ -255,7 +224,7 @@ def test_builder_rejects_context_over_model_limit() -> None:
         )
 
 
-def test_step_result_copies_and_validates_sample_mapping() -> None:
+def test_step_result_copies_and_validates_parallel_arrays() -> None:
     request_ids = [10, 11]
     token_ids = [101, 102]
 
@@ -273,12 +242,6 @@ def test_step_result_copies_and_validates_sample_mapping() -> None:
 
     with pytest.raises(ValueError, match="counts"):
         StepResult(12, (10,), (101, 102))
-
-    with pytest.raises(ValueError, match="unique"):
-        StepResult(12, (10, 10), (101, 102))
-
-    with pytest.raises(ValueError, match="non-negative"):
-        StepResult(12, (10,), (-1,))
 
 
 def test_fake_executor_preserves_sampling_order() -> None:

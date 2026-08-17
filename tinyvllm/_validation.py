@@ -16,11 +16,3 @@ def _check_positive_int(name: str, value: int) -> None:
 
 def _check_token_id(token_id: int) -> None:
     _check_non_negative_int("token_id", token_id)
-
-
-def _check_optional_non_negative_int(
-    name: str,
-    value: int | None,
-) -> None:
-    if value is not None:
-        _check_non_negative_int(name, value)

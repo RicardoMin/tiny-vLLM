@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from heapq import heappop, heappush
 
 from tinyvllm.batch import StepPlan, WorkItem
 from tinyvllm.request import (
@@ -48,48 +49,10 @@ class TxnState(Enum):
     FAILED = auto()
 
 
-@dataclass(frozen=True, slots=True)
-class StagedAdmission:
-    request_id: int
-    request_slot: int
-
-    def __post_init__(self) -> None:
-        _check_non_negative_int("request_id", self.request_id)
-        _check_non_negative_int("request_slot", self.request_slot)
-
-
 @dataclass(slots=True)
 class ScheduleTxn:
     plan: StepPlan
-    admissions: tuple[StagedAdmission, ...]
     state: TxnState = field(default=TxnState.PREPARED, init=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.plan, StepPlan):
-            raise TypeError("plan must be StepPlan")
-
-        self.admissions = tuple(self.admissions)
-        for admission in self.admissions:
-            if not isinstance(admission, StagedAdmission):
-                raise TypeError(
-                    "admissions must contain StagedAdmission values"
-                )
-
-        plan_pairs = {
-            (item.request_id, item.request_slot)
-            for item in self.plan.items
-        }
-        admission_pairs = {
-            (item.request_id, item.request_slot)
-            for item in self.admissions
-        }
-
-        if len(admission_pairs) != len(self.admissions):
-            raise ValueError("admissions must be unique")
-        if not admission_pairs.issubset(plan_pairs):
-            raise ValueError(
-                "every admission must refer to a planned item"
-            )
 
 
 class Scheduler:
@@ -121,6 +84,7 @@ class Scheduler:
         self.prefill_chunk_size = prefill_chunk_size
         
         self._requests: dict[int, RequestState] = {}
+        self._pending_arrivals: list[tuple[int, int, int]] = []
         self._waiting_ids: deque[int] = deque()
         self._slot_request_ids: list[int | None] = (
             [None] * max_active_requests
@@ -217,6 +181,14 @@ class Scheduler:
         # Publish only after the complete command batch validates.
         for request in staged:
             self._requests[request.request_id] = request
+            heappush(
+                self._pending_arrivals,
+                (
+                    request.arrival_ns,
+                    request.submit_seq,
+                    request.request_id,
+                ),
+            )
 
         if staged:
             self._last_command_seq = staged[-1].submit_seq
@@ -227,8 +199,6 @@ class Scheduler:
 
 
     def begin_step(self, now_ns: int) -> ScheduleTxn | None:
-        _check_non_negative_int("now_ns", now_ns)
-
         if self._open_txn is not None:
             raise RuntimeError(
                 "a scheduling transaction is already open"
@@ -248,7 +218,6 @@ class Scheduler:
 
         remaining_tokens = self.max_scheduled_tokens
         items: list[WorkItem] = []
-        admissions: list[StagedAdmission] = []
 
         for request_id, request_slot in zip(
             self._waiting_ids,
@@ -257,23 +226,12 @@ class Scheduler:
             if remaining_tokens == 0:
                 break
             request = self._requests[request_id]
-            request.check_committed_invariants()
-
-            if request.status is not RequestStatus.WAITING:
-                raise RuntimeError(
-                    "waiting queue contains a non-waiting request"
-                )
 
             query_len = min(
                 request.num_uncomputed_tokens,
                 self.prefill_chunk_size,
                 remaining_tokens,
             )
-            if query_len <= 0:
-                raise RuntimeError(
-                    "waiting request has no schedulable tokens"
-                )
-
             token_start = request.computed_tokens
             token_end = token_start + query_len
 
@@ -288,12 +246,6 @@ class Scheduler:
                     should_sample=token_end == request.total_tokens,
                 )
             )
-            admissions.append(
-                StagedAdmission(
-                    request_id=request.request_id,
-                    request_slot=request_slot,
-                )
-            )
             remaining_tokens -= query_len
 
         if not items:
@@ -304,7 +256,6 @@ class Scheduler:
                 plan_id=self._next_plan_id,
                 items=tuple(items),
             ),
-            admissions=tuple(admissions),
         )
         self._next_plan_id += 1
         self._open_txn = txn
@@ -318,133 +269,24 @@ class Scheduler:
     ) -> None:
         """Publish runtime ownership immediately before execution."""
         self._require_open_txn(txn, TxnState.PREPARED)
-        if not self._command_cutoff_ready:
-            raise RuntimeError("no command cutoff is ready")
-
         self._check_now(now_ns)
 
-        admission_slots: dict[int, int] = {}
-        for admission in txn.admissions:
-            if not isinstance(admission, StagedAdmission):
-                raise TypeError(
-                    "admission must contain StagedAdmission values"
-                )
-            if admission.request_id in admission_slots:
-                raise RuntimeError(
-                    "transaction contains duplicate admissions"
-                )
-            admission_slots[admission.request_id] = (
-                admission.request_slot
-            )
-
-        if len(self._waiting_ids) < len(txn.admissions):
-            raise RuntimeError(
-                "admission no longer match the waiting queue"
-            )
-
-        for waiting_id, admission in zip(
-            self._waiting_ids,
-            txn.admissions,
-        ):
-            if waiting_id != admission.request_id:
-                raise RuntimeError(
-                    "admission no longer match the waiting queue head"
-                )
-
-        plan_items = {
-            item.request_id: item
-            for item in txn.plan.items
-        }
-
-        for admission in txn.admissions:
-            item = plan_items.get(admission.request_id)
-            if (
-                item is None
-                or item.request_slot != admission.request_slot
-            ):
-                raise RuntimeError(
-                    "admission does not match the step plan"
-                )
-
-        # Validate the complete plan before publishing any mutation.
-        validated: list[tuple[RequestState, int | None]] = []
-
+        plan_id = txn.plan.plan_id
         for item in txn.plan.items:
-            request = self._requests.get(item.request_id)
-            if request is None:
-                raise RuntimeError(
-                    "plan refers to an unknown request"
-                )
-            if item.request_slot >= self.max_active_requests:
-                raise RuntimeError(
-                    "planned request slot is out of range"
-                )
-            if request.inflight_plan_id is not None:
-                raise RuntimeError(
-                    "planned request is already inflight"
-                )
-            if request.work_class is not item.work_class:
-                raise RuntimeError(
-                    "request work class no longer matches the plan"
-                )
-            if (
-                request.computed_tokens != item.token_start
-                or item.context_len_before != request.computed_tokens
-            ):
-                raise RuntimeError(
-                    "request progress no longer matches the plan"
-                )
+            request = self._requests[item.request_id]
 
-            admission_slot = admission_slots.get(item.request_id)
-
-            if admission_slot is not None:
-                if request.status is not RequestStatus.WAITING:
-                    raise RuntimeError(
-                        "admitted request is not waiting"
-                    )
-                if request.active_slot is not None:
-                    raise RuntimeError(
-                        "admitted request already owns a slot"
-                    )
-                if self._slot_request_ids[item.request_slot] is not None:
-                    raise RuntimeError(
-                        "admission request slot is not free"
-                    )
-            else:
-                if request.status is not RequestStatus.RUNNING:
-                    raise RuntimeError(
-                        "non-admitted plan item is not running"
-                    )
-                if request.active_slot != item.request_slot:
-                    raise RuntimeError(
-                        "running request slot no longer matches the plan"
-                    )
-                if (
-                    self._slot_request_ids[item.request_slot]
-                    != request.request_id
-                ):
-                    raise RuntimeError(
-                        "running request does not own its slot"
-                    )
-
-            validated.append((request, admission_slot))
-
-        # Publication starts here. Everything above must remain mutation-free.
-        for _ in txn.admissions:
-            self._waiting_ids.popleft()
-
-        for request, admission_slot in validated:
-            if admission_slot is not None:
+            if request.status is RequestStatus.WAITING:
+                self._waiting_ids.popleft()
                 request.status = RequestStatus.RUNNING
-                request.active_slot = admission_slot
-                self._slot_request_ids[admission_slot] = (
+                request.active_slot = item.request_slot
+                self._slot_request_ids[item.request_slot] = (
                     request.request_id
                 )
 
                 if request.admitted_ns is None:
                     request.admitted_ns = now_ns
 
-            request.inflight_plan_id = txn.plan.plan_id
+            request.inflight_plan_id = plan_id
 
         self._now_ns = now_ns
         self._command_cutoff_ready = False
@@ -474,28 +316,23 @@ class Scheduler:
 
     def _free_slots(self) -> list[int]:
         return [
-            slot 
+            slot
             for slot, request_id in enumerate(self._slot_request_ids)
             if request_id is None
         ]
 
 
     def _promote_arrivals(self, now_ns: int) -> None:
-        eligible = sorted(
-            (
-                request
-                for request in self._requests.values()
-                if request.status is RequestStatus.PENDING
-                and request.arrival_ns <= now_ns
-            ),
-            key=lambda request: (
-                request.arrival_ns,
-                request.submit_seq,
-            ),
-        )
+        while (
+            self._pending_arrivals
+            and self._pending_arrivals[0][0] <= now_ns
+        ):
+            _, _, request_id = heappop(self._pending_arrivals)
+            request = self._requests[request_id]
 
+            if request.status is not RequestStatus.PENDING:
+                continue
 
-        for request in eligible:
             if request.sampling.max_new_tokens == 0:
                 request.status = RequestStatus.FINISHED
                 request.admitted_ns = now_ns
@@ -507,8 +344,6 @@ class Scheduler:
             else:
                 request.status = RequestStatus.WAITING
                 self._waiting_ids.append(request.request_id)
-
-            request.check_committed_invariants()
 
 
     def _check_now(self, now_ns: int) -> None:

@@ -4,7 +4,6 @@ import pytest
 
 from tinyvllm._validation import (
     _check_non_negative_int,
-    _check_optional_non_negative_int,
     _check_positive_int,
     _check_token_id,
 )
@@ -32,11 +31,3 @@ def test_token_id_uses_non_negative_contract() -> None:
 
     with pytest.raises(ValueError, match="non-negative"):
         _check_token_id(-1)
-
-
-def test_optional_integer_contract() -> None:
-    _check_optional_non_negative_int("value", None)
-    _check_optional_non_negative_int("value", 0)
-
-    with pytest.raises(ValueError, match="non-negative"):
-        _check_optional_non_negative_int("value", -1)

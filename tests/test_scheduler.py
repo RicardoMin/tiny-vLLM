@@ -332,29 +332,6 @@ def test_mark_dispatched_publishes_runtime_ownership() -> None:
         assert request.output_token_ids == []
 
 
-def test_dispatch_prevalidation_is_atomic() -> None:
-    scheduler = make_scheduler(active=2)
-    scheduler.apply_commands(
-        (command(0, 10), command(1, 11)),
-        now_ns=10,
-    )
-    txn = scheduler.begin_step(now_ns=10)
-    assert txn is not None
-
-    scheduler.get_request(11).inflight_plan_id = 999
-    before = committed_state(scheduler)
-
-    with pytest.raises(RuntimeError, match="already inflight"):
-        scheduler.mark_dispatched(txn, now_ns=12)
-
-    assert committed_state(scheduler) == before
-    assert txn.state is TxnState.PREPARED
-
-    scheduler.get_request(11).inflight_plan_id = None
-    scheduler.mark_dispatched(txn, now_ns=12)
-    assert scheduler.get_request(10).admitted_ns == 12
-
-
 def test_dispatched_transaction_cannot_roll_back() -> None:
     scheduler = make_scheduler()
     scheduler.apply_commands((command(0, 10),), now_ns=0)

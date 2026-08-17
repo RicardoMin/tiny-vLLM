@@ -17,9 +17,6 @@ class CpuFakeExecutor:
 
 
     def execute(self, batch: PreparedBatch) -> StepResult:
-        if not isinstance(batch, PreparedBatch):
-            raise TypeError("batch must be PreparedBatch")
-
         return StepResult(
             plan_id=batch.plan_id,
             sample_request_ids=batch.sample_request_ids,
