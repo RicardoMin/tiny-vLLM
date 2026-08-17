@@ -6,10 +6,12 @@ import copy
 
 from tinyvllm.batch import (
     BatchBuilder,
+    StepResult,
     StepMode,
     StepPlan,
     WorkItem,
 )
+from tinyvllm.executor import CpuFakeExecutor
 from tinyvllm.request import (
     RequestState,
     RequestStatus,
@@ -251,3 +253,68 @@ def test_builder_rejects_context_over_model_limit() -> None:
             ),
             (request,),
         )
+
+
+def test_step_result_copies_and_validates_sample_mapping() -> None:
+    request_ids = [10, 11]
+    token_ids = [101, 102]
+
+    result = StepResult(
+        plan_id=12,
+        sample_request_ids=request_ids,
+        sampled_token_ids=token_ids,
+    )
+
+    request_ids.append(12)
+    token_ids.append(103)
+
+    assert result.sample_request_ids == (10, 11)
+    assert result.sampled_token_ids == (101, 102)
+
+    with pytest.raises(ValueError, match="counts"):
+        StepResult(12, (10,), (101, 102))
+
+    with pytest.raises(ValueError, match="unique"):
+        StepResult(12, (10, 10), (101, 102))
+
+    with pytest.raises(ValueError, match="non-negative"):
+        StepResult(12, (10,), (-1,))
+
+
+def test_fake_executor_preserves_sampling_order() -> None:
+    request = waiting_request()
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        StepPlan(
+            plan_id=13,
+            items=(prefill_item(),),
+        ),
+        (request,),
+    )
+
+    result = CpuFakeExecutor(token_id=99).execute(batch)
+
+    assert result == StepResult(
+        plan_id=13,
+        sample_request_ids=(1,),
+        sampled_token_ids=(99,),
+    )
+
+
+def test_fake_executor_returns_empty_partial_prefill_result() -> None:
+    request = waiting_request(
+        prompt=(21, 22, 23, 24, 25),
+    )
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        StepPlan(
+            plan_id=14,
+            items=(prefill_item(should_sample=False),),
+        ),
+        (request,),
+    )
+
+    result = CpuFakeExecutor(token_id=99).execute(batch)
+
+    assert result.sample_request_ids == ()
+    assert result.sampled_token_ids == ()

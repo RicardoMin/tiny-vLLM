@@ -13,6 +13,7 @@ from tinyvllm.request import (
 from tinyvllm._validation import (
     _check_non_negative_int,
     _check_positive_int,
+    _check_token_id,
 )
 
 
@@ -304,6 +305,46 @@ class PreparedBatch:
     @property
     def num_decode_tokens(self) -> int:
         return self.q_offsets[self.num_decode_items]
+
+
+@dataclass(frozen=True, slots=True)
+class StepResult:
+    """Ordered executor output for one dispatched plan."""
+
+    plan_id: int
+    sample_request_ids: tuple[int, ...]
+    sampled_token_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        _check_non_negative_int("plan_id", self.plan_id)
+
+        object.__setattr__(
+            self,
+            "sample_request_ids",
+            tuple(self.sample_request_ids),
+        )
+        object.__setattr__(
+            self,
+            "sampled_token_ids",
+            tuple(self.sampled_token_ids),
+        )
+
+        if len(self.sample_request_ids) != len(self.sampled_token_ids):
+            raise ValueError(
+                "sample request and token counts do not match"
+            )
+
+        seen_request_ids: set[int] = set()
+        for request_id in self.sample_request_ids:
+            _check_non_negative_int("sample_request_id", request_id)
+            if request_id in seen_request_ids:
+                raise ValueError(
+                    "sample_request_ids must be unique"
+                )
+            seen_request_ids.add(request_id)
+
+        for token_id in self.sampled_token_ids:
+            _check_token_id(token_id)
 
 
 class BatchBuilder:
