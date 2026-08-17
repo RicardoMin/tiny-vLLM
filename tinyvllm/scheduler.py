@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from heapq import heappop, heappush
 
-from tinyvllm.batch import StepPlan, WorkItem
+from tinyvllm.batch import StepPlan, StepResult, WorkItem
 from tinyvllm.request import (
     RequestState,
     RequestStatus,
@@ -14,6 +14,7 @@ from tinyvllm.request import (
 from tinyvllm._validation import (
     _check_non_negative_int,
     _check_positive_int,
+    _check_token_id,
 )
 
 
@@ -298,6 +299,76 @@ class Scheduler:
 
         txn.state = TxnState.ROLLED_BACK
         self._open_txn = None
+
+
+    def commit_step(
+        self,
+        txn: ScheduleTxn,
+        result: StepResult,
+        now_ns: int,
+    ) -> tuple[int, ...]:
+        self._require_open_txn(txn, TxnState.DISPATCHED)
+
+        try:
+            self._check_now(now_ns)
+            plan = txn.plan
+
+            if result.plan_id != plan.plan_id:
+                raise RuntimeError("result plan_id does not match plan")
+            if len(result.sample_request_ids) != plan.num_samples:
+                raise RuntimeError("result sample count does not match plan")
+
+            # Validate executor output before publishing any request state.
+            sample_index = 0
+            for item in plan.items:
+                if not item.should_sample:
+                    continue
+                if result.sample_request_ids[sample_index] != item.request_id:
+                    raise RuntimeError("result sampling order does not match plan")
+                _check_token_id(result.sampled_token_ids[sample_index])
+                sample_index += 1
+
+            sample_index = 0
+            finished_ids: list[int] = []
+
+            for item in plan.items:
+                request = self._requests[item.request_id]
+                request.computed_tokens = item.token_end
+                request.inflight_plan_id = None
+
+                if not item.should_sample:
+                    continue
+
+                request.output_token_ids.append(
+                    result.sampled_token_ids[sample_index]
+                )
+                sample_index += 1
+
+                if request.first_token_ns is None:
+                    request.first_token_ns = now_ns
+
+                request.work_class = WorkClass.DECODE
+
+                if request.remaining_new_tokens == 0:
+                    self._slot_request_ids[item.request_slot] = None
+                    request.active_slot = None
+                    request.status = RequestStatus.FINISHED
+                    request.finished_ns = now_ns
+                    finished_ids.append(request.request_id)
+
+        except Exception:
+            self.fail_step(txn)
+            raise
+
+        self._now_ns = now_ns
+        txn.state = TxnState.COMMITTED
+        self._open_txn = None
+        return tuple(finished_ids)
+
+
+    def fail_step(self, txn: ScheduleTxn) -> None:
+        self._require_open_txn(txn, TxnState.DISPATCHED)
+        txn.state = TxnState.FAILED
 
 
     def _require_open_txn(

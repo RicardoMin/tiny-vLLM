@@ -3,9 +3,14 @@ from __future__ import annotations
 import pytest
 import copy
 
-from tinyvllm.request import RequestStatus, SamplingParams
+from tinyvllm.request import (
+    RequestStatus, 
+    SamplingParams,
+    WorkClass
+)
 from tinyvllm.scheduler import AddCommand, Scheduler, TxnState
-from tinyvllm.batch import BatchBuilder
+from tinyvllm.batch import BatchBuilder, StepResult
+from tinyvllm.executor import CpuFakeExecutor
 
 
 def command(
@@ -349,3 +354,164 @@ def test_dispatched_transaction_cannot_roll_back() -> None:
         scheduler.get_request(10).inflight_plan_id
         == txn.plan.plan_id
     )
+
+
+def _run_fake_step(scheduler: Scheduler):
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        txn.plan,
+        tuple(
+            scheduler.get_request(item.request_id)
+            for item in txn.plan.items
+        ),
+    )
+    scheduler.mark_dispatched(txn, now_ns=1)
+
+    result = CpuFakeExecutor(token_id=99).execute(batch)
+    return txn, result
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "chunk", "max_new_tokens", "expected"),
+    (
+        (
+            5, 2, 4,
+            (2, (), RequestStatus.RUNNING,
+             WorkClass.PREFILL, 0, ()),
+        ),
+        (
+            3, 4, 4,
+            (3, (99,), RequestStatus.RUNNING,
+             WorkClass.DECODE, 0, ()),
+        ),
+        (
+            3, 4, 1,
+            (3, (99,), RequestStatus.FINISHED,
+             WorkClass.DECODE, None, (10,)),
+        ),
+    ),
+)
+def test_commit_request_lifecycle(
+    prompt_len: int,
+    chunk: int,
+    max_new_tokens: int,
+    expected: tuple,
+) -> None:
+    scheduler = make_scheduler(active=1, chunk=chunk)
+    scheduler.apply_commands(
+        (
+            command(
+                0,
+                10,
+                prompt_len=prompt_len,
+                max_new_tokens=max_new_tokens,
+            ),
+        ),
+        now_ns=0,
+    )
+    txn, result = _run_fake_step(scheduler)
+
+    finished_ids = scheduler.commit_step(
+        txn,
+        result,
+        now_ns=2,
+    )
+    request = scheduler.get_request(10)
+
+    actual = (
+        request.computed_tokens,
+        tuple(request.output_token_ids),
+        request.status,
+        request.work_class,
+        request.active_slot,
+        finished_ids,
+    )
+    assert actual == expected
+
+    output = expected[1]
+    assert request.total_tokens == prompt_len + len(output)
+    assert request.inflight_plan_id is None
+    assert request.first_token_ns == (2 if output else None)
+    assert request.finished_ns == (
+        2 if finished_ids else None
+    )
+    assert txn.state is TxnState.COMMITTED
+    assert not scheduler.has_open_transaction
+
+    if finished_ids:
+        scheduler.apply_commands(
+            (command(1, 11),),
+            now_ns=3,
+        )
+        next_txn = scheduler.begin_step(now_ns=3)
+        assert next_txn is not None
+        assert next_txn.plan.items[0].request_slot == 0
+        scheduler.rollback(next_txn)
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    ("plan", "order", "token"),
+)
+def test_bad_result_fails_before_publish(
+    bad_result: str,
+) -> None:
+    scheduler = make_scheduler(active=2)
+    scheduler.apply_commands(
+        (command(0, 10), command(1, 11)),
+        now_ns=0,
+    )
+    txn, result = _run_fake_step(scheduler)
+    before = committed_state(scheduler)
+
+    if bad_result == "plan":
+        result = StepResult(
+            result.plan_id + 1,
+            (10, 11),
+            (99, 99),
+        )
+    elif bad_result == "order":
+        result = StepResult(
+            result.plan_id,
+            (11, 10),
+            (99, 99),
+        )
+    else:
+        result = StepResult(
+            result.plan_id,
+            (10, 11),
+            (99, -1),
+        )
+
+    with pytest.raises((RuntimeError, ValueError)):
+        scheduler.commit_step(txn, result, now_ns=2)
+
+    assert committed_state(scheduler) == before
+    assert txn.state is TxnState.FAILED
+    assert scheduler.has_open_transaction
+
+
+def test_executor_failure_is_fail_stop() -> None:
+    scheduler = make_scheduler()
+    scheduler.apply_commands(
+        (command(0, 10),),
+        now_ns=0,
+    )
+    txn, _ = _run_fake_step(scheduler)
+
+    scheduler.fail_step(txn)
+
+    request = scheduler.get_request(10)
+    assert txn.state is TxnState.FAILED
+    assert request.inflight_plan_id == txn.plan.plan_id
+
+    with pytest.raises(RuntimeError, match="open transaction"):
+        scheduler.apply_commands((), now_ns=2)
+
+    with pytest.raises(RuntimeError, match="already open"):
+        scheduler.begin_step(now_ns=2)
+
+    with pytest.raises(RuntimeError, match="must be prepared"):
+        scheduler.rollback(txn)
