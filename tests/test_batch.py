@@ -2,8 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from tinyvllm.batch import StepMode, StepPlan, WorkItem
-from tinyvllm.request import WorkClass
+import copy
+
+from tinyvllm.batch import (
+    BatchBuilder,
+    StepMode,
+    StepPlan,
+    WorkItem,
+)
+from tinyvllm.request import (
+    RequestState,
+    RequestStatus,
+    SamplingParams,
+    WorkClass,
+)
 
 
 def prefill_item(
@@ -37,6 +49,36 @@ def decode_item(
         should_sample=True,
     )
 
+def waiting_request(
+    request_id: int = 1,
+    *,
+    prompt: tuple[int, ...] = (21, 22, 23),
+) -> RequestState:
+    return RequestState(
+        request_id=request_id,
+        submit_seq=request_id,
+        prompt_token_ids=list(prompt),
+        sampling=SamplingParams(max_new_tokens=4),
+        arrival_ns=0,
+        status=RequestStatus.WAITING,
+    )
+
+
+def running_decode_request() -> RequestState:
+    return RequestState(
+        request_id=2,
+        submit_seq=2,
+        prompt_token_ids=[10, 11, 12],
+        sampling=SamplingParams(max_new_tokens=4),
+        arrival_ns=0,
+        output_token_ids=[13],
+        status=RequestStatus.RUNNING,
+        work_class=WorkClass.DECODE,
+        computed_tokens=3,
+        active_slot=1,
+        admitted_ns=0,
+        first_token_ns=1,
+    )
 
 def test_work_item_lengths() -> None:
     item = prefill_item()
@@ -102,3 +144,110 @@ def test_plan_rejects_duplicate_request() -> None:
 def test_plan_rejects_empty_items() -> None:
     with pytest.raises(ValueError, match="at least one"):
         StepPlan(plan_id=1, items=())
+
+
+def test_builder_flattens_mixed_batch_without_padding() -> None:
+    decode = running_decode_request()
+    prefill = waiting_request(
+        prompt=(21, 22, 23, 24, 25)
+    )
+    before = copy.deepcopy((decode, prefill))
+
+    plan = StepPlan(
+        plan_id=7,
+        items=(
+            decode_item(),
+            prefill_item(should_sample=False),
+        ),
+    )
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        plan,
+        (decode, prefill),
+    )
+
+    assert batch.mode is StepMode.MIXED
+    assert batch.input_ids == (13, 21, 22, 23)
+    assert batch.positions == (3, 0, 1, 2)
+    assert batch.token_request_slots == (1, 0, 0, 0)
+    assert batch.q_offsets == (0, 1, 4)
+    assert batch.context_lens_before == (3, 0)
+    assert batch.query_lens == (1, 3)
+    assert batch.context_lens_after == (4, 3)
+    assert batch.num_decode_tokens == 1
+
+    # Partial prefill does not produce a sampling row.
+    assert batch.sample_token_indices == (0,)
+    assert batch.sample_request_ids == (2,)
+    assert batch.sampling_params == (decode.sampling,)
+
+    assert (decode, prefill) == before
+
+
+def test_final_prefill_maps_its_last_query_row() -> None:
+    request = waiting_request()
+    plan = StepPlan(
+        plan_id=8,
+        items=(prefill_item(),),
+    )
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        plan,
+        (request,),
+    )
+
+    assert batch.sample_token_indices == (2,)
+    assert batch.sample_request_ids == (1,)
+    assert batch.num_samples == 1
+
+
+def test_builder_rejects_stale_plan() -> None:
+    request = waiting_request()
+    stale_item = WorkItem(
+        request_id=1,
+        request_slot=0,
+        work_class=WorkClass.PREFILL,
+        token_start=1,
+        query_len=2,
+        context_len_before=1,
+        should_sample=True,
+    )
+    plan = StepPlan(plan_id=9, items=(stale_item,))
+
+    with pytest.raises(
+        ValueError,
+        match="committed progress",
+    ):
+        BatchBuilder(max_model_len=16).prepare(
+            plan,
+            (request,),
+        )
+
+
+def test_builder_rejects_wrong_request_order() -> None:
+    plan = StepPlan(
+        plan_id=10,
+        items=(decode_item(), prefill_item()),
+    )
+
+    with pytest.raises(ValueError, match="request order"):
+        BatchBuilder(max_model_len=16).prepare(
+            plan,
+            (
+                waiting_request(),
+                running_decode_request(),
+            ),
+        )
+
+
+def test_builder_rejects_context_over_model_limit() -> None:
+    request = waiting_request()
+
+    with pytest.raises(ValueError, match="max_model_len"):
+        BatchBuilder(max_model_len=2).prepare(
+            StepPlan(
+                plan_id=11,
+                items=(prefill_item(),),
+            ),
+            (request,),
+        )

@@ -82,21 +82,21 @@ class ScheduleTxn:
                     "admissions must contain StagedAdmission values"
                 )
 
-            plan_pairs = {
-                (item.request_id, item.request_slot)
-                for item in self.plan.items
-            }
-            admission_pairs = {
-                (item.request_id, item.request_slot)
-                for item in self.admissions
-            }
+        plan_pairs = {
+            (item.request_id, item.request_slot)
+            for item in self.plan.items
+        }
+        admission_pairs = {
+            (item.request_id, item.request_slot)
+            for item in self.admissions
+        }
 
-            if len(admission_pairs) != len(self.admissions):
-                raise ValueError("admissions must be unique")
-            if not admission_pairs.issubset(plan_pairs):
-                raise ValueError(
-                    "every admission must refer to a planned item"
-                )
+        if len(admission_pairs) != len(self.admissions):
+            raise ValueError("admissions must be unique")
+        if not admission_pairs.issubset(plan_pairs):
+            raise ValueError(
+                "every admission must refer to a planned item"
+            )
 
 
 class Scheduler:
@@ -115,7 +115,7 @@ class Scheduler:
 
         if max_step_requests > max_active_requests:
             raise ValueError(
-                "max_step_requests exceeds active-request capatity"
+                "max_step_requests exceeds active-request capacity"
             )
         if prefill_chunk_size > max_scheduled_tokens:
             raise ValueError(
@@ -125,7 +125,7 @@ class Scheduler:
         self.max_active_requests = max_active_requests
         self.max_step_requests = max_step_requests
         self.max_scheduled_tokens = max_scheduled_tokens
-        self.prefill_chunk_tokens = prefill_chunk_size
+        self.prefill_chunk_size = prefill_chunk_size
         
         self._requests: dict[int, RequestState] = {}
         self._waiting_ids: list[int] = []
@@ -264,7 +264,7 @@ class Scheduler:
 
             query_len = min(
                 request.num_uncomputed_tokens,
-                self.prefill_chunk_tokens,
+                self.prefill_chunk_size,
                 remaining_tokens,
             )
             if query_len <= 0:
@@ -312,7 +312,7 @@ class Scheduler:
     def rollback(self, txn: ScheduleTxn) -> None:
         if txn is not self._open_txn:
             raise ValueError(
-                "transaction is not the scheduler's open tansaction"
+                "transaction is not the scheduler's open transaction"
             )
         if txn.state is not TxnState.PREPARED:
             raise RuntimeError(
