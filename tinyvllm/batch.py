@@ -193,7 +193,8 @@ class BatchBuilder:
                 raise ValueError(
                     "request order does not match plan"
                 )
-            if item.context_len_after > self.max_model_len:
+            context_len_after = item.context_len_after
+            if context_len_after > self.max_model_len:
                 raise ValueError(
                     "planned context exceeds max_model_len"
                 )
@@ -211,7 +212,7 @@ class BatchBuilder:
             positions.extend(
                 range(
                     item.context_len_before,
-                    item.context_len_after,
+                    context_len_after,
                 )
             )
             token_request_slots.extend(
@@ -224,7 +225,7 @@ class BatchBuilder:
             )
             query_lens.append(item.query_len)
             context_lens_after.append(
-                item.context_len_after
+                context_len_after
             )
 
             if item.should_sample:

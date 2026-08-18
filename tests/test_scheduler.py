@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import pytest
 import copy
+from dataclasses import FrozenInstanceError
+
+import pytest
 
 from tinyvllm.request import (
-    RequestStatus, 
+    RequestStatus,
     SamplingParams,
     WorkClass
 )
 from tinyvllm.scheduler import AddCommand, Scheduler, TxnState
 from tinyvllm.batch import (
-    BatchBuilder, 
+    BatchBuilder,
     StepResult,
     StepMode,
 )
@@ -42,6 +44,7 @@ def make_scheduler(
     rows: int | None = None,
     tokens: int = 8,
     chunk: int = 4,
+    model_len: int = 32,
     reserve_tokens: int = 128,
     reserve_rows: int = 1,
 ) -> Scheduler:
@@ -50,6 +53,7 @@ def make_scheduler(
         max_step_requests=active if rows is None else rows,
         max_scheduled_tokens=tokens,
         prefill_chunk_size=chunk,
+        max_model_len=model_len,
         prefill_reserve_tokens=reserve_tokens,
         prefill_reserve_requests=reserve_rows,
     )
@@ -105,6 +109,24 @@ def test_command_batch_is_atomic() -> None:
 
     assert scheduler.request_ids == ()
     assert scheduler.last_command_seq == -1
+
+
+def test_prompt_over_model_limit_is_rejected_atomically() -> None:
+    scheduler = make_scheduler(model_len=3)
+
+    with pytest.raises(ValueError, match="prompt exceeds"):
+        scheduler.apply_commands(
+            (command(0, 10, prompt_len=4),),
+            now_ns=0,
+        )
+
+    assert scheduler.request_ids == ()
+    assert scheduler.last_command_seq == -1
+
+
+def test_scheduler_requires_matching_prefill_reservations() -> None:
+    with pytest.raises(ValueError, match="both be zero or positive"):
+        make_scheduler(reserve_tokens=1, reserve_rows=0)
 
 
 def test_future_arrival_stays_pending() -> None:
@@ -277,6 +299,20 @@ def test_only_one_transaction_may_be_open() -> None:
     scheduler.rollback(txn)
     assert txn.state is TxnState.ROLLED_BACK
     assert not scheduler.has_open_transaction
+
+
+def test_schedule_transaction_is_immutable() -> None:
+    scheduler = make_scheduler()
+    scheduler.apply_commands((command(0, 10),), now_ns=0)
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+
+    with pytest.raises(FrozenInstanceError):
+        txn.plan = txn.plan
+    with pytest.raises(FrozenInstanceError):
+        txn.state = TxnState.COMMITTED
+
+    scheduler.rollback(txn)
 
 
 def test_rollback_retry_uses_a_fresh_plan_id() -> None:
@@ -607,6 +643,44 @@ def test_active_request_runs_until_completion() -> None:
         14,
     )
 
+    scheduler.apply_commands((), now_ns=15)
+    assert scheduler.begin_step(now_ns=15) is None
+
+
+def test_model_limit_finishes_without_an_invalid_decode() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        tokens=4,
+        chunk=4,
+        model_len=3,
+    )
+    scheduler.apply_commands(
+        (command(0, 10, prompt_len=3, max_new_tokens=4),),
+        now_ns=0,
+    )
+
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+    batch = BatchBuilder(max_model_len=3).prepare(
+        txn.plan,
+        (scheduler.get_request(10),),
+    )
+    scheduler.mark_dispatched(txn, now_ns=1)
+    finished_ids = scheduler.commit_step(
+        txn,
+        CpuFakeExecutor(token_id=99).execute(batch),
+        now_ns=2,
+    )
+
+    request = scheduler.get_request(10)
+    assert finished_ids == (10,)
+    assert request.status is RequestStatus.FINISHED
+    assert request.computed_tokens == 3
+    assert request.output_token_ids == [99]
+
+    scheduler.apply_commands((), now_ns=3)
+    assert scheduler.begin_step(now_ns=3) is None
+
 
 def test_mixed_active_and_waiting_share_budgets() -> None:
     scheduler = make_scheduler(
@@ -667,6 +741,44 @@ def test_mixed_active_and_waiting_share_budgets() -> None:
 
     result = CpuFakeExecutor(token_id=99).execute(batch)
     scheduler.commit_step(txn, result, now_ns=5)
+
+
+def test_waiting_prefill_gets_a_turn_while_active_prefill_runs() -> None:
+    scheduler = make_scheduler(
+        active=5,
+        rows=3,
+        tokens=6,
+        chunk=2,
+        model_len=128,
+        reserve_tokens=2,
+        reserve_rows=1,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=1, max_new_tokens=100),
+            command(1, 11, prompt_len=1, max_new_tokens=100),
+            command(2, 12, prompt_len=100, max_new_tokens=2),
+        ),
+        now_ns=0,
+    )
+    first_plan, _ = _commit_fake_step(scheduler, 0)
+    assert tuple(item.request_id for item in first_plan.items) == (
+        10,
+        11,
+        12,
+    )
+
+    scheduler.apply_commands(
+        (command(3, 13, prompt_len=1),),
+        now_ns=3,
+    )
+    _commit_fake_step(scheduler, 3)
+    third_plan, _ = _commit_fake_step(scheduler, 6)
+
+    request_ids = tuple(item.request_id for item in third_plan.items)
+    assert 13 in request_ids
+    assert len(request_ids) == len(set(request_ids))
+    assert scheduler.get_request(13).status is RequestStatus.RUNNING
 
 
 def test_prefill_reservation_protects_progress() -> None:

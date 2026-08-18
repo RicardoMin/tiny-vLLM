@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from heapq import heappop, heappush
@@ -50,9 +51,10 @@ class TxnState(Enum):
     FAILED = auto()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ScheduleTxn:
     plan: StepPlan
+    rotate_prefill: bool = False
     state: TxnState = field(default=TxnState.PREPARED, init=False)
 
 
@@ -64,6 +66,7 @@ class Scheduler:
         max_step_requests: int,
         max_scheduled_tokens: int,
         prefill_chunk_size: int,
+        max_model_len: int,
         prefill_reserve_tokens: int = 128,
         prefill_reserve_requests: int = 1,
     ) -> None:
@@ -71,12 +74,19 @@ class Scheduler:
         _check_positive_int("max_step_requests", max_step_requests)
         _check_positive_int("max_scheduled_tokens", max_scheduled_tokens)
         _check_positive_int("prefill_chunk_size", prefill_chunk_size)
+        _check_positive_int("max_model_len", max_model_len)
         _check_non_negative_int("prefill_reserve_tokens", prefill_reserve_tokens)
         _check_non_negative_int("prefill_reserve_requests", prefill_reserve_requests)
 
         if prefill_reserve_tokens < prefill_reserve_requests:
             raise ValueError(
                 "each reserved prefill request needs one token"
+            )
+        if (prefill_reserve_tokens == 0) != (
+            prefill_reserve_requests == 0
+        ):
+            raise ValueError(
+                "prefill reservations must both be zero or positive"
             )
 
         if max_step_requests > max_active_requests:
@@ -92,14 +102,16 @@ class Scheduler:
         self.max_step_requests = max_step_requests
         self.max_scheduled_tokens = max_scheduled_tokens
         self.prefill_chunk_size = prefill_chunk_size
+        self.max_model_len = max_model_len
         self.prefill_reserve_tokens = prefill_reserve_tokens
         self.prefill_reserve_requests = prefill_reserve_requests
-        
+
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
         self._waiting_ids: deque[int] = deque()
         self._prefill_ids: deque[int] = deque()
         self._decode_ids: deque[int] = deque()
+        self._prefer_waiting_prefill = False
         self._slot_request_ids: list[int | None] = (
             [None] * max_active_requests
         )
@@ -137,9 +149,9 @@ class Scheduler:
 
 
     def take_immediate_finished_request_ids(self) -> tuple[int, ...]:
-        requests_ids = tuple(self._immediate_finished_ids)
+        request_ids = tuple(self._immediate_finished_ids)
         self._immediate_finished_ids.clear()
-        return requests_ids
+        return request_ids
 
 
     def apply_commands(
@@ -179,6 +191,9 @@ class Scheduler:
                 raise ValueError(
                     f"duplicate request_id: {command.request_id}"
                 )
+
+            if len(command.prompt_token_ids) > self.max_model_len:
+                raise ValueError("prompt exceeds max_model_len")
 
             request = RequestState(
                 request_id=command.request_id,
@@ -234,7 +249,7 @@ class Scheduler:
             for request_id in self._decode_ids
         ]
 
-        prefill_candidates = [
+        active_prefill_candidates = [
             (
                 self._requests[request_id],
                 self._requests[request_id].active_slot,
@@ -242,14 +257,25 @@ class Scheduler:
             for request_id in self._prefill_ids
         ]
 
-        if self.waiting_request_ids:
-            prefill_candidates.extend(
+        waiting_prefill_candidates = []
+        if self._waiting_ids:
+            waiting_prefill_candidates.extend(
                 (self._requests[request_id], request_slot)
                 for request_id, request_slot in zip(
                     self._waiting_ids,
                     self._free_slots(),
                 )
             )
+
+        has_active_prefill = bool(active_prefill_candidates)
+        has_waiting_prefill = bool(waiting_prefill_candidates)
+
+        if self._prefer_waiting_prefill:
+            prefill_candidates = waiting_prefill_candidates
+            prefill_candidates.extend(active_prefill_candidates)
+        else:
+            prefill_candidates = active_prefill_candidates
+            prefill_candidates.extend(waiting_prefill_candidates)
 
         reserve_rows = 0
         reserve_tokens = 0
@@ -349,6 +375,9 @@ class Scheduler:
                 plan_id=self._next_plan_id,
                 items=tuple(items),
             ),
+            rotate_prefill=(
+                has_active_prefill and has_waiting_prefill
+            ),
         )
         self._next_plan_id += 1
         self._open_txn = txn
@@ -368,7 +397,9 @@ class Scheduler:
         for item in txn.plan.items:
             request = self._requests[item.request_id]
 
-            if request.status is RequestStatus.WAITING:
+            if item.work_class is WorkClass.DECODE:
+                self._decode_ids.popleft()
+            elif request.status is RequestStatus.WAITING:
                 self._waiting_ids.popleft()
                 request.status = RequestStatus.RUNNING
                 request.active_slot = item.request_slot
@@ -378,20 +409,20 @@ class Scheduler:
 
                 if request.admitted_ns is None:
                     request.admitted_ns = now_ns
-
-                self._prefill_ids.append(request.request_id)
+            else:
+                self._prefill_ids.popleft()
 
             request.inflight_plan_id = plan_id
 
         self._now_ns = now_ns
         self._command_cutoff_ready = False
-        txn.state = TxnState.DISPATCHED
+        object.__setattr__(txn, "state", TxnState.DISPATCHED)
 
 
     def rollback(self, txn: ScheduleTxn) -> None:
         self._require_open_txn(txn, TxnState.PREPARED)
 
-        txn.state = TxnState.ROLLED_BACK
+        object.__setattr__(txn, "state", TxnState.ROLLED_BACK)
         self._open_txn = None
 
 
@@ -430,11 +461,6 @@ class Scheduler:
                 request.computed_tokens = item.token_end
                 request.inflight_plan_id = None
 
-                if item.work_class is WorkClass.PREFILL:
-                    self._prefill_ids.popleft()
-                else:
-                    self._decode_ids.popleft()
-
                 if not item.should_sample:
                     self._prefill_ids.append(request.request_id)
                     continue
@@ -449,7 +475,10 @@ class Scheduler:
 
                 request.work_class = WorkClass.DECODE
 
-                if request.remaining_new_tokens == 0:
+                if (
+                    request.remaining_new_tokens == 0
+                    or request.computed_tokens >= self.max_model_len
+                ):
                     self._slot_request_ids[item.request_slot] = None
                     request.active_slot = None
                     request.status = RequestStatus.FINISHED
@@ -458,19 +487,24 @@ class Scheduler:
                 else:
                     self._decode_ids.append(request.request_id)
 
+            if txn.rotate_prefill and plan.num_prefill_items:
+                self._prefer_waiting_prefill = (
+                    not self._prefer_waiting_prefill
+                )
+
         except Exception:
             self.fail_step(txn)
             raise
 
         self._now_ns = now_ns
-        txn.state = TxnState.COMMITTED
+        object.__setattr__(txn, "state", TxnState.COMMITTED)
         self._open_txn = None
         return tuple(finished_ids)
 
 
     def fail_step(self, txn: ScheduleTxn) -> None:
         self._require_open_txn(txn, TxnState.DISPATCHED)
-        txn.state = TxnState.FAILED
+        object.__setattr__(txn, "state", TxnState.FAILED)
 
 
     def _require_open_txn(
@@ -487,12 +521,12 @@ class Scheduler:
                 f"transaction must be {expected_state.name.lower()}"
             )
 
-    def _free_slots(self) -> list[int]:
-        return [
+    def _free_slots(self) -> Iterator[int]:
+        return (
             slot
             for slot, request_id in enumerate(self._slot_request_ids)
             if request_id is None
-        ]
+        )
 
     def _make_work_item(
         self,
@@ -570,29 +604,6 @@ class Scheduler:
             start + len(items),
             used_tokens,
         )
-
-    def _work_candidates(self):
-        for request_id in self._decode_ids:
-            request = self._requests[request_id]
-            yield request, request.active_slot, WorkClass.DECODE
-
-        for request_id in self._prefill_ids:
-            request = self._requests[request_id]
-            yield request, request.active_slot, WorkClass.PREFILL
-
-        if not self._waiting_ids:
-            return
-
-        for request_id, request_slot in zip(
-            self._waiting_ids,
-            self._free_slots(),
-        ):
-            yield (
-                self._requests[request_id],
-                request_slot,
-                WorkClass.PREFILL
-            )
-
 
     def _promote_arrivals(self, now_ns: int) -> None:
         while (
