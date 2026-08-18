@@ -9,7 +9,11 @@ from tinyvllm.request import (
     WorkClass
 )
 from tinyvllm.scheduler import AddCommand, Scheduler, TxnState
-from tinyvllm.batch import BatchBuilder, StepResult
+from tinyvllm.batch import (
+    BatchBuilder, 
+    StepResult,
+    StepMode,
+)
 from tinyvllm.executor import CpuFakeExecutor
 
 
@@ -515,3 +519,148 @@ def test_executor_failure_is_fail_stop() -> None:
 
     with pytest.raises(RuntimeError, match="must be prepared"):
         scheduler.rollback(txn)
+
+
+def _commit_fake_step(scheduler: Scheduler, now_ns: int):
+    scheduler.apply_commands((), now_ns=now_ns)
+    txn = scheduler.begin_step(now_ns=now_ns)
+    assert txn is not None
+
+    batch = BatchBuilder(max_model_len=32).prepare(
+        txn.plan,
+        tuple(
+            scheduler.get_request(item.request_id)
+            for item in txn.plan.items
+        ),
+    )
+    scheduler.mark_dispatched(txn, now_ns=now_ns + 1)
+    result = CpuFakeExecutor(token_id=99).execute(batch)
+    finished_ids = scheduler.commit_step(
+        txn,
+        result,
+        now_ns=now_ns + 2,
+    )
+    return txn.plan, finished_ids
+
+
+def test_active_request_runs_until_completion() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        tokens=2,
+        chunk=2,
+    )
+    scheduler.apply_commands(
+        (
+            command(
+                0,
+                10,
+                prompt_len=5,
+                max_new_tokens=3,
+            ),
+        ),
+        now_ns=0,
+    )
+
+    observed = []
+    for now_ns in range(0, 15, 3):
+        plan, finished_ids = _commit_fake_step(
+            scheduler,
+            now_ns,
+        )
+        item = plan.items[0]
+        observed.append(
+            (
+                item.work_class,
+                item.query_len,
+                item.should_sample,
+            )
+        )
+
+    assert observed == [
+        (WorkClass.PREFILL, 2, False),
+        (WorkClass.PREFILL, 2, False),
+        (WorkClass.PREFILL, 1, True),
+        (WorkClass.DECODE, 1, True),
+        (WorkClass.DECODE, 1, True),
+    ]
+    assert finished_ids == (10,)
+
+    request = scheduler.get_request(10)
+    assert (
+        request.computed_tokens,
+        request.total_tokens,
+        request.output_token_ids,
+        request.status,
+        request.active_slot,
+        request.first_token_ns,
+        request.finished_ns,
+    ) == (
+        7,
+        8,
+        [99, 99, 99],
+        RequestStatus.FINISHED,
+        None,
+        8,
+        14,
+    )
+
+
+def test_mixed_active_and_waiting_share_budgets() -> None:
+    scheduler = make_scheduler(
+        active=3,
+        rows=3,
+        tokens=4,
+        chunk=3,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=1),
+            command(1, 11, prompt_len=5),
+            command(2, 12, prompt_len=5),
+        ),
+        now_ns=0,
+    )
+    first_plan, _ = _commit_fake_step(scheduler, 0)
+
+    assert tuple(
+        item.request_id for item in first_plan.items
+    ) == (10, 11)
+    assert scheduler.waiting_request_ids == (12,)
+
+    scheduler.apply_commands((), now_ns=3)
+    txn = scheduler.begin_step(now_ns=3)
+    assert txn is not None
+
+    assert tuple(
+        (
+            item.request_id,
+            item.request_slot,
+            item.work_class,
+            item.query_len,
+        )
+        for item in txn.plan.items
+    ) == (
+        (10, 0, WorkClass.DECODE, 1),
+        (11, 1, WorkClass.PREFILL, 2),
+        (12, 2, WorkClass.PREFILL, 1),
+    )
+    assert txn.plan.mode is StepMode.MIXED
+    assert txn.plan.num_query_tokens == 4
+
+    batch = BatchBuilder(max_model_len=32).prepare(
+        txn.plan,
+        tuple(
+            scheduler.get_request(item.request_id)
+            for item in txn.plan.items
+        ),
+    )
+    scheduler.mark_dispatched(txn, now_ns=4)
+
+    assert scheduler.waiting_request_ids == ()
+    assert tuple(
+        scheduler.get_request(request_id).active_slot
+        for request_id in (10, 11, 12)
+    ) == (0, 1, 2)
+
+    result = CpuFakeExecutor(token_id=99).execute(batch)
+    scheduler.commit_step(txn, result, now_ns=5)

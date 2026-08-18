@@ -87,6 +87,8 @@ class Scheduler:
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
         self._waiting_ids: deque[int] = deque()
+        self._prefill_ids: deque[int] = deque()
+        self._decode_ids: deque[int] = deque()
         self._slot_request_ids: list[int | None] = (
             [None] * max_active_requests
         )
@@ -213,25 +215,24 @@ class Scheduler:
                 "apply_commands must run first with the same now_ns"
             )
 
-        free_slots = self._free_slots()
-        if not free_slots or not self._waiting_ids:
-            return None
-
+        remaining_rows = self.max_step_requests
         remaining_tokens = self.max_scheduled_tokens
         items: list[WorkItem] = []
 
-        for request_id, request_slot in zip(
-            self._waiting_ids,
-            free_slots[: self.max_step_requests],
+        for request, request_slot, work_class in (
+            self._work_candidates()
         ):
-            if remaining_tokens == 0:
+            if remaining_rows == 0 or remaining_tokens == 0:
                 break
-            request = self._requests[request_id]
 
-            query_len = min(
-                request.num_uncomputed_tokens,
-                self.prefill_chunk_size,
-                remaining_tokens,
+            query_len = (
+                1
+                if work_class is WorkClass.DECODE
+                else min(
+                    request.num_uncomputed_tokens,
+                    self.prefill_chunk_size,
+                    remaining_tokens,
+                )
             )
             token_start = request.computed_tokens
             token_end = token_start + query_len
@@ -240,13 +241,17 @@ class Scheduler:
                 WorkItem(
                     request_id=request.request_id,
                     request_slot=request_slot,
-                    work_class=WorkClass.PREFILL,
+                    work_class=work_class,
                     token_start=token_start,
                     query_len=query_len,
                     context_len_before=token_start,
-                    should_sample=token_end == request.total_tokens,
+                    should_sample=(
+                        work_class is WorkClass.DECODE
+                        or token_end == request.total_tokens
+                    ),
                 )
             )
+            remaining_rows -= 1
             remaining_tokens -= query_len
 
         if not items:
@@ -286,6 +291,8 @@ class Scheduler:
 
                 if request.admitted_ns is None:
                     request.admitted_ns = now_ns
+
+            self._prefill_ids.append(request.request_id)
 
             request.inflight_plan_id = plan_id
 
@@ -336,7 +343,13 @@ class Scheduler:
                 request.computed_tokens = item.token_end
                 request.inflight_plan_id = None
 
+                if item.work_class is WorkClass.PREFILL:
+                    self._prefill_ids.popleft()
+                else:
+                    self._decode_ids.popleft()
+
                 if not item.should_sample:
+                    self._prefill_ids.append(request.request_id)
                     continue
 
                 request.output_token_ids.append(
@@ -355,6 +368,8 @@ class Scheduler:
                     request.status = RequestStatus.FINISHED
                     request.finished_ns = now_ns
                     finished_ids.append(request.request_id)
+                else:
+                    self._decode_ids.append(request.request_id)
 
         except Exception:
             self.fail_step(txn)
@@ -391,6 +406,29 @@ class Scheduler:
             for slot, request_id in enumerate(self._slot_request_ids)
             if request_id is None
         ]
+
+
+    def _work_candidates(self):
+        for request_id in self._decode_ids:
+            request = self._requests[request_id]
+            yield request, request.active_slot, WorkClass.DECODE
+
+        for request_id in self._prefill_ids:
+            request = self._requests[request_id]
+            yield request, request.active_slot, WorkClass.PREFILL
+
+        if not self._waiting_ids:
+            return
+
+        for request_id, request_slot in zip(
+            self._waiting_ids,
+            self._free_slots(),
+        ):
+            yield (
+                self._requests[request_id],
+                request_slot,
+                WorkClass.PREFILL
+            )
 
 
     def _promote_arrivals(self, now_ns: int) -> None:
