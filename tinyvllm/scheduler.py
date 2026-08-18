@@ -64,11 +64,20 @@ class Scheduler:
         max_step_requests: int,
         max_scheduled_tokens: int,
         prefill_chunk_size: int,
+        prefill_reserve_tokens: int = 128,
+        prefill_reserve_requests: int = 1,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
         _check_positive_int("max_step_requests", max_step_requests)
         _check_positive_int("max_scheduled_tokens", max_scheduled_tokens)
         _check_positive_int("prefill_chunk_size", prefill_chunk_size)
+        _check_non_negative_int("prefill_reserve_tokens", prefill_reserve_tokens)
+        _check_non_negative_int("prefill_reserve_requests", prefill_reserve_requests)
+
+        if prefill_reserve_tokens < prefill_reserve_requests:
+            raise ValueError(
+                "each reserved prefill request needs one token"
+            )
 
         if max_step_requests > max_active_requests:
             raise ValueError(
@@ -83,6 +92,8 @@ class Scheduler:
         self.max_step_requests = max_step_requests
         self.max_scheduled_tokens = max_scheduled_tokens
         self.prefill_chunk_size = prefill_chunk_size
+        self.prefill_reserve_tokens = prefill_reserve_tokens
+        self.prefill_reserve_requests = prefill_reserve_requests
         
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
@@ -215,44 +226,120 @@ class Scheduler:
                 "apply_commands must run first with the same now_ns"
             )
 
+        decode_candidates = [
+            (
+                self._requests[request_id],
+                self._requests[request_id].active_slot,
+            )
+            for request_id in self._decode_ids
+        ]
+
+        prefill_candidates = [
+            (
+                self._requests[request_id],
+                self._requests[request_id].active_slot,
+            )
+            for request_id in self._prefill_ids
+        ]
+
+        if self.waiting_request_ids:
+            prefill_candidates.extend(
+                (self._requests[request_id], request_slot)
+                for request_id, request_slot in zip(
+                    self._waiting_ids,
+                    self._free_slots(),
+                )
+            )
+
+        reserve_rows = 0
+        reserve_tokens = 0
+
+        if decode_candidates and prefill_candidates:
+            reserve_rows = min(
+                self.prefill_reserve_requests,
+                self.max_step_requests - 1,
+                len(prefill_candidates),
+            )
+            reserve_tokens = min(
+                self.prefill_reserve_tokens,
+                self.max_scheduled_tokens - 1,
+            )
+
+            reserve_rows = min(
+                reserve_rows,
+                reserve_tokens,
+            )
+
+            if reserve_rows == 0:
+                reserve_tokens = 0
+
         remaining_rows = self.max_step_requests
         remaining_tokens = self.max_scheduled_tokens
-        items: list[WorkItem] = []
 
-        for request, request_slot, work_class in (
-            self._work_candidates()
-        ):
-            if remaining_rows == 0 or remaining_tokens == 0:
-                break
+        decode_count = min(
+            len(decode_candidates),
+            remaining_rows - reserve_rows,
+            remaining_tokens - reserve_tokens,
+        )
 
-            query_len = (
-                1
-                if work_class is WorkClass.DECODE
-                else min(
-                    request.num_uncomputed_tokens,
-                    self.prefill_chunk_size,
-                    remaining_tokens,
-                )
+        remaining_rows -= decode_count
+        remaining_tokens -= decode_count
+
+        prefill_budget = (
+            remaining_tokens
+            if decode_count == len(decode_candidates)
+            else reserve_tokens
+        )
+
+        prefill_items, prefill_index, prefill_tokens = (
+            self._take_prefills(
+                prefill_candidates,
+                start=0,
+                row_budget=reserve_rows,
+                token_budget=prefill_budget,
+                spread=True,
             )
-            token_start = request.computed_tokens
-            token_end = token_start + query_len
+        )
 
-            items.append(
-                WorkItem(
-                    request_id=request.request_id,
-                    request_slot=request_slot,
-                    work_class=work_class,
-                    token_start=token_start,
-                    query_len=query_len,
-                    context_len_before=token_start,
-                    should_sample=(
-                        work_class is WorkClass.DECODE
-                        or token_end == request.total_tokens
-                    ),
-                )
+        remaining_rows -= len(prefill_items)
+        remaining_tokens -= prefill_tokens
+
+        decode_count += min(
+            len(decode_candidates) - decode_count,
+            remaining_rows,
+            remaining_tokens,
+        )
+
+        remaining_rows = self.max_step_requests - (
+            decode_count + len(prefill_items)
+        )
+        remaining_tokens = self.max_scheduled_tokens - (
+            decode_count + prefill_tokens
+        )
+
+        if decode_count == len(decode_candidates):
+            extra_items, _, _ = self._take_prefills(
+                prefill_candidates,
+                start=prefill_index,
+                row_budget=remaining_rows,
+                token_budget=remaining_tokens,
+                spread=False,
             )
-            remaining_rows -= 1
-            remaining_tokens -= query_len
+            prefill_items.extend(extra_items)
+
+        decode_items = [
+            self._make_work_item(
+                request,
+                request_slot,
+                WorkClass.DECODE,
+                1,
+            )
+            for request, request_slot in (
+                decode_candidates[:decode_count]
+            )
+        ]
+
+        items = decode_items + prefill_items
 
         if not items:
             return None
@@ -292,7 +379,7 @@ class Scheduler:
                 if request.admitted_ns is None:
                     request.admitted_ns = now_ns
 
-            self._prefill_ids.append(request.request_id)
+                self._prefill_ids.append(request.request_id)
 
             request.inflight_plan_id = plan_id
 
@@ -407,6 +494,82 @@ class Scheduler:
             if request_id is None
         ]
 
+    def _make_work_item(
+        self,
+        request: RequestState,
+        request_slot: int,
+        work_class: WorkClass,
+        query_len: int,
+    ) -> WorkItem:
+        token_start = request.computed_tokens
+        token_end = token_start + query_len
+
+        return WorkItem(
+            request_id=request.request_id,
+            request_slot=request_slot,
+            work_class=work_class,
+            token_start=token_start,
+            query_len=query_len,
+            context_len_before=token_start,
+            should_sample=(
+                work_class is WorkClass.DECODE
+                or token_end == request.total_tokens
+            ),
+        )
+
+    def _take_prefills(
+        self,
+        candidates,
+        *,
+        start: int,
+        row_budget,
+        token_budget,
+        spread: bool,
+    ) -> tuple[list[WorkItem], int, int]:
+        count = min(
+            len(candidates) - start,
+            row_budget,
+            token_budget,
+        )
+
+        items: list[WorkItem] = []
+        used_tokens = 0
+
+        for offset in range(count):
+            request, request_slot = candidates[start + offset]
+
+            tokens_for_later = (
+                count - offset - 1
+                if spread
+                else 0
+            )
+
+            query_len = min(
+                request.num_uncomputed_tokens,
+                self.prefill_chunk_size,
+                token_budget
+                - used_tokens
+                - tokens_for_later,
+            )
+
+            if query_len == 0:
+                break
+
+            items.append(
+                self._make_work_item(
+                    request,
+                    request_slot,
+                    WorkClass.PREFILL,
+                    query_len,
+                )
+            )
+            used_tokens += query_len
+
+        return (
+            items,
+            start + len(items),
+            used_tokens,
+        )
 
     def _work_candidates(self):
         for request_id in self._decode_ids:

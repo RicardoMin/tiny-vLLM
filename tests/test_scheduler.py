@@ -36,19 +36,22 @@ def command(
     )
 
 
-
 def make_scheduler(
     *,
     active: int = 4,
     rows: int | None = None,
     tokens: int = 8,
     chunk: int = 4,
+    reserve_tokens: int = 128,
+    reserve_rows: int = 1,
 ) -> Scheduler:
     return Scheduler(
         max_active_requests=active,
         max_step_requests=active if rows is None else rows,
         max_scheduled_tokens=tokens,
         prefill_chunk_size=chunk,
+        prefill_reserve_tokens=reserve_tokens,
+        prefill_reserve_requests=reserve_rows,
     )
 
 
@@ -664,3 +667,101 @@ def test_mixed_active_and_waiting_share_budgets() -> None:
 
     result = CpuFakeExecutor(token_id=99).execute(batch)
     scheduler.commit_step(txn, result, now_ns=5)
+
+
+def test_prefill_reservation_protects_progress() -> None:
+    scheduler = make_scheduler(
+        active=4,
+        rows=3,
+        tokens=6,
+        chunk=4,
+        reserve_tokens=2,
+        reserve_rows=1,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=1),
+            command(1, 11, prompt_len=1),
+            command(2, 12, prompt_len=1),
+            command(3, 13, prompt_len=5),
+        ),
+        now_ns=0,
+    )
+
+    first_plan, _ = _commit_fake_step(scheduler, 0)
+    assert tuple(
+        item.request_id for item in first_plan.items
+    ) == (10, 11, 12)
+
+    scheduler.apply_commands((), now_ns=3)
+    txn = scheduler.begin_step(now_ns=3)
+    assert txn is not None
+
+    items = tuple(
+        (
+            item.request_id,
+            item.work_class,
+            item.query_len,
+        )
+        for item in txn.plan.items
+    )
+    assert items == (
+        (10, WorkClass.DECODE, 1),
+        (11, WorkClass.DECODE, 1),
+        (13, WorkClass.PREFILL, 2),
+    )
+    assert len(
+        {item.request_id for item in txn.plan.items}
+    ) == len(txn.plan.items)
+
+    scheduler.rollback(txn)
+
+
+def test_unused_prefill_reservation_backfills_decode() -> None:
+    scheduler = make_scheduler(
+        active=5,
+        rows=4,
+        tokens=8,
+        chunk=4,
+        reserve_tokens=2,
+        reserve_rows=2,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 20, prompt_len=1),
+            command(1, 21, prompt_len=1),
+            command(2, 22, prompt_len=1),
+            command(3, 23, prompt_len=1),
+            command(4, 24, prompt_len=1),
+        ),
+        now_ns=0,
+    )
+
+    first_plan, _ = _commit_fake_step(scheduler, 0)
+    assert tuple(
+        item.request_id for item in first_plan.items
+    ) == (20, 21, 22, 23)
+
+    scheduler.apply_commands((), now_ns=3)
+    txn = scheduler.begin_step(now_ns=3)
+    assert txn is not None
+
+    assert tuple(
+        item.request_id for item in txn.plan.items
+    ) == (20, 21, 22, 24)
+    assert tuple(
+        item.work_class for item in txn.plan.items
+    ) == (
+        WorkClass.DECODE,
+        WorkClass.DECODE,
+        WorkClass.DECODE,
+        WorkClass.PREFILL,
+    )
+    assert len(
+        {
+            item.request_id
+            for item in txn.plan.items
+        }
+    ) == len(txn.plan.items)
+
+    scheduler.rollback(txn)
