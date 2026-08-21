@@ -17,6 +17,7 @@ from tinyvllm.batch import (
     StepMode,
 )
 from tinyvllm.executor import CpuFakeExecutor
+from tinyvllm.cache import KvTxnState
 
 
 def command(
@@ -47,6 +48,8 @@ def make_scheduler(
     model_len: int = 32,
     reserve_tokens: int = 128,
     reserve_rows: int = 1,
+    kv_page_size: int = 16,
+    kv_num_pages: int | None = None,
 ) -> Scheduler:
     return Scheduler(
         max_active_requests=active,
@@ -56,6 +59,8 @@ def make_scheduler(
         max_model_len=model_len,
         prefill_reserve_tokens=reserve_tokens,
         prefill_reserve_requests=reserve_rows,
+        kv_page_size=kv_page_size,
+        kv_num_pages=kv_num_pages,
     )
 
 
@@ -363,6 +368,9 @@ def test_mark_dispatched_publishes_runtime_ownership() -> None:
     scheduler.mark_dispatched(txn, now_ns=12)
 
     assert txn.state is TxnState.DISPATCHED
+    assert txn.kv.state is KvTxnState.DISPATCHED
+    assert scheduler.kv_manager.page_table(10)
+    assert scheduler.kv_manager.valid_token_count(10) == 0
     assert scheduler.has_open_transaction
     assert scheduler.waiting_request_ids == (12,)
     assert (
@@ -387,6 +395,8 @@ def test_dispatched_transaction_cannot_roll_back() -> None:
     assert txn is not None
 
     scheduler.mark_dispatched(txn, now_ns=1)
+
+    assert txn.kv.state is KvTxnState.DISPATCHED
 
     with pytest.raises(RuntimeError, match="must be prepared"):
         scheduler.rollback(txn)
@@ -481,9 +491,12 @@ def test_commit_request_lifecycle(
         2 if finished_ids else None
     )
     assert txn.state is TxnState.COMMITTED
+    assert txn.kv.state is KvTxnState.COMMITTED
     assert not scheduler.has_open_transaction
 
     if finished_ids:
+        assert scheduler.kv_manager.page_table(10) == ()
+        assert scheduler.kv_manager.valid_token_count(10) == 0
         scheduler.apply_commands(
             (command(1, 11),),
             now_ns=3,
@@ -533,6 +546,8 @@ def test_bad_result_fails_before_publish(
 
     assert committed_state(scheduler) == before
     assert txn.state is TxnState.FAILED
+    assert txn.kv.state is KvTxnState.DISPATCHED
+    assert scheduler.kv_manager.valid_token_count(10) == 0
     assert scheduler.has_open_transaction
 
 
@@ -548,6 +563,7 @@ def test_executor_failure_is_fail_stop() -> None:
 
     request = scheduler.get_request(10)
     assert txn.state is TxnState.FAILED
+    assert txn.kv.state is KvTxnState.DISPATCHED
     assert request.inflight_plan_id == txn.plan.plan_id
 
     with pytest.raises(RuntimeError, match="open transaction"):
@@ -877,3 +893,109 @@ def test_unused_prefill_reservation_backfills_decode() -> None:
     ) == len(txn.plan.items)
 
     scheduler.rollback(txn)
+
+
+def test_begin_step_reserves_kv_without_publishing_table() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        rows=1,
+        tokens=4,
+        chunk=4,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=2,
+    )
+    scheduler.apply_commands(
+        (command(0, 10, prompt_len=3),),
+        now_ns=0,
+    )
+
+    initial_free = scheduler.kv_manager.allocator.free_page_count
+    txn = scheduler.begin_step(now_ns=0)
+
+    assert txn is not None
+    assert txn.kv.state is KvTxnState.PREPARED
+    assert scheduler.kv_manager.page_table(10) == ()
+    assert txn.kv.staged_page_table(10)
+    assert (
+        scheduler.kv_manager.allocator.free_page_count
+        == initial_free - 1
+    )
+
+    scheduler.rollback(txn)
+
+    assert txn.kv.state is KvTxnState.ROLLED_BACK
+    assert scheduler.kv_manager.page_table(10) == ()
+    assert (
+        scheduler.kv_manager.allocator.free_page_count
+        == initial_free
+    )
+
+
+def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
+    scheduler = make_scheduler(
+        active=2,
+        rows=2,
+        tokens=8,
+        chunk=8,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=1,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=4),
+            command(1, 11, prompt_len=4),
+        ),
+        now_ns=0,
+    )
+
+    before = committed_state(scheduler)
+    before_allocator = scheduler.kv_manager.allocator.snapshot()
+
+    assert scheduler.begin_step(now_ns=0) is None
+
+    assert committed_state(scheduler) == before
+    assert (
+        scheduler.kv_manager.allocator.snapshot()
+        == before_allocator
+    )
+    assert scheduler.kv_manager.page_table(10) == ()
+    assert scheduler.kv_manager.page_table(11) == ()
+    assert not scheduler.has_open_transaction
+
+
+def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=2,
+    )
+    scheduler.apply_commands(
+        (command(0, 10, prompt_len=5),),
+        now_ns=0,
+    )
+
+    before_allocator = scheduler.kv_manager.allocator.snapshot()
+    txn = scheduler.begin_step(now_ns=0)
+
+    assert txn is not None
+
+    with pytest.raises(ValueError, match="max_model_len"):
+        BatchBuilder(max_model_len=2).prepare(
+            txn.plan,
+            (scheduler.get_request(10),),
+        )
+
+    scheduler.rollback(txn)
+
+    assert txn.kv.state is KvTxnState.ROLLED_BACK
+    assert scheduler.kv_manager.page_table(10) == ()
+
+    after_allocator = scheduler.kv_manager.allocator.snapshot()
+    assert after_allocator[0] == before_allocator[0]
+    assert after_allocator[2] == before_allocator[2]
+    assert after_allocator[1][0] == (
+        before_allocator[1][0] + 1
+    )

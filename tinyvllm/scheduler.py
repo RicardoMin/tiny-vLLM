@@ -18,6 +18,12 @@ from tinyvllm._validation import (
     _check_token_id,
 )
 
+from tinyvllm.cache import (
+    KvAppend,
+    KvPageManager,
+    KvPlanTxn,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AddCommand:
@@ -54,6 +60,7 @@ class TxnState(Enum):
 @dataclass(frozen=True, slots=True)
 class ScheduleTxn:
     plan: StepPlan
+    kv: KvPlanTxn
     rotate_prefill: bool = False
     state: TxnState = field(default=TxnState.PREPARED, init=False)
 
@@ -69,12 +76,15 @@ class Scheduler:
         max_model_len: int,
         prefill_reserve_tokens: int = 128,
         prefill_reserve_requests: int = 1,
+        kv_page_size: int = 16,
+        kv_num_pages: int | None = None,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
         _check_positive_int("max_step_requests", max_step_requests)
         _check_positive_int("max_scheduled_tokens", max_scheduled_tokens)
         _check_positive_int("prefill_chunk_size", prefill_chunk_size)
         _check_positive_int("max_model_len", max_model_len)
+        _check_positive_int("kv_page_size", kv_page_size)
         _check_non_negative_int("prefill_reserve_tokens", prefill_reserve_tokens)
         _check_non_negative_int("prefill_reserve_requests", prefill_reserve_requests)
 
@@ -98,6 +108,13 @@ class Scheduler:
                 "prefill_chunk_size exceeds the step token budget"
             )
 
+        if kv_num_pages is None:
+            kv_num_pages = max_active_requests * (
+                (max_model_len + kv_page_size - 1) // kv_page_size
+            )
+        else:
+            _check_positive_int("kv_num_pages", kv_num_pages)
+
         self.max_active_requests = max_active_requests
         self.max_step_requests = max_step_requests
         self.max_scheduled_tokens = max_scheduled_tokens
@@ -105,6 +122,11 @@ class Scheduler:
         self.max_model_len = max_model_len
         self.prefill_reserve_tokens = prefill_reserve_tokens
         self.prefill_reserve_requests = prefill_reserve_requests
+        self.kv_page_size = kv_page_size
+        self._kv_manager = KvPageManager(
+            page_size=kv_page_size,
+            num_pages=kv_num_pages,
+        )
 
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
@@ -142,6 +164,11 @@ class Scheduler:
     @property
     def last_command_seq(self) -> int:
         return self._last_command_seq
+
+
+    @property
+    def kv_manager(self) -> KvPageManager:
+        return self._kv_manager
 
 
     def get_request(self, request_id: int) -> RequestState:
@@ -370,11 +397,29 @@ class Scheduler:
         if not items:
             return None
 
-        txn = ScheduleTxn(
-            plan=StepPlan(
-                plan_id=self._next_plan_id,
-                items=tuple(items),
+        plan = StepPlan(
+            plan_id=self._next_plan_id,
+            items=tuple(items),
+        )
+
+        kv_txn = self._kv_manager.begin_plan(
+            plan_id=plan.plan_id,
+            appends=tuple(
+                KvAppend(
+                    request_id=item.request_id,
+                    token_start=item.token_start,
+                    query_len=item.query_len,
+                )
+                for item in plan.items
             ),
+        )
+
+        if kv_txn is None:
+            return None
+
+        txn = ScheduleTxn(
+            plan=plan,
+            kv=kv_txn,
             rotate_prefill=(
                 has_active_prefill and has_waiting_prefill
             ),
@@ -393,34 +438,47 @@ class Scheduler:
         self._require_open_txn(txn, TxnState.PREPARED)
         self._check_now(now_ns)
 
-        plan_id = txn.plan.plan_id
-        for item in txn.plan.items:
-            request = self._requests[item.request_id]
+        txn.kv.commit_before_dispatch()
+        object.__setattr__(
+            txn,
+            "state",
+            TxnState.DISPATCHED,
+        )
 
-            if item.work_class is WorkClass.DECODE:
-                self._decode_ids.popleft()
-            elif request.status is RequestStatus.WAITING:
-                self._waiting_ids.popleft()
-                request.status = RequestStatus.RUNNING
-                request.active_slot = item.request_slot
-                self._slot_request_ids[item.request_slot] = (
-                    request.request_id
-                )
+        try:
+            plan_id = txn.plan.plan_id
+            for item in txn.plan.items:
+                request = self._requests[item.request_id]
 
-                if request.admitted_ns is None:
-                    request.admitted_ns = now_ns
-            else:
-                self._prefill_ids.popleft()
+                if item.work_class is WorkClass.DECODE:
+                    self._decode_ids.popleft()
+                elif request.status is RequestStatus.WAITING:
+                    self._waiting_ids.popleft()
+                    request.status = RequestStatus.RUNNING
+                    request.active_slot = item.request_slot
+                    self._slot_request_ids[item.request_slot] = (
+                        request.request_id
+                    )
 
-            request.inflight_plan_id = plan_id
+                    if request.admitted_ns is None:
+                        request.admitted_ns = now_ns
+                else:
+                    self._prefill_ids.popleft()
 
-        self._now_ns = now_ns
-        self._command_cutoff_ready = False
-        object.__setattr__(txn, "state", TxnState.DISPATCHED)
+                request.inflight_plan_id = plan_id
+
+            self._now_ns = now_ns
+            self._command_cutoff_ready = False
+        except Exception:
+            # KV already dispatch, could not rollback.
+            self.fail_step(txn)
+            raise
 
 
     def rollback(self, txn: ScheduleTxn) -> None:
         self._require_open_txn(txn, TxnState.PREPARED)
+
+        txn.kv.rollback()
 
         object.__setattr__(txn, "state", TxnState.ROLLED_BACK)
         self._open_txn = None
@@ -452,6 +510,9 @@ class Scheduler:
                     raise RuntimeError("result sampling order does not match plan")
                 _check_token_id(result.sampled_token_ids[sample_index])
                 sample_index += 1
+
+            # Executor 结果验证完毕后，推进 KV 的有效 token 数.
+            txn.kv.complete_writes()
 
             sample_index = 0
             finished_ids: list[int] = []
@@ -486,6 +547,9 @@ class Scheduler:
                     finished_ids.append(request.request_id)
                 else:
                     self._decode_ids.append(request.request_id)
+
+            for request_id in finished_ids:
+                self._kv_manager.release_request(request_id)
 
             if txn.rotate_prefill and plan.num_prefill_items:
                 self._prefer_waiting_prefill = (
