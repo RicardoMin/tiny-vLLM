@@ -305,6 +305,24 @@ class KvPageManager:
     def valid_token_count(self, request_id: int) -> int:
         return self._valid_token_counts.get(request_id, 0)
 
+    @property
+    def free_page_count(self) -> int:
+        return self.allocator.free_page_count
+
+
+    def required_new_pages(self, append: KvAppend) -> int:
+        """Return page growth for a validated append without mutation."""
+        table = self.page_table(append.request_id)
+        token_end = append.token_start + append.query_len
+        new_page_count = (
+            self._pages_for_tokens(token_end) - len(table)
+        )
+        if new_page_count < 0:
+            raise RuntimeError(
+                "page table exceeds valid KV length"
+            )
+        return new_page_count
+
 
     def begin_plan(
         self,

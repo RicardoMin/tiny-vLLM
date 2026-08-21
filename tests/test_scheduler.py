@@ -936,7 +936,7 @@ def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
     scheduler = make_scheduler(
         active=2,
         rows=2,
-        tokens=8,
+        tokens=10,
         chunk=8,
         model_len=8,
         kv_page_size=4,
@@ -944,8 +944,8 @@ def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
     )
     scheduler.apply_commands(
         (
-            command(0, 10, prompt_len=4),
-            command(1, 11, prompt_len=4),
+            command(0, 10, prompt_len=5),
+            command(1, 11, prompt_len=5),
         ),
         now_ns=0,
     )
@@ -998,4 +998,111 @@ def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
     assert after_allocator[2] == before_allocator[2]
     assert after_allocator[1][0] == (
         before_allocator[1][0] + 1
+    )
+
+
+def test_kv_fallback_runs_decode_that_reuses_a_partial_page() -> None:
+    scheduler = make_scheduler(
+        active=2,
+        rows=2,
+        tokens=8,
+        chunk=8,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=2,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=4, max_new_tokens=2),
+            command(1, 11, prompt_len=3, max_new_tokens=2),
+        ),
+        now_ns=0,
+    )
+
+    _commit_fake_step(scheduler, 0)
+
+    scheduler.apply_commands((), now_ns=3)
+    txn = scheduler.begin_step(now_ns=3)
+
+    assert txn is not None
+    assert txn.kv_fallback
+    assert tuple(
+        item.request_id for item in txn.plan.items
+    ) == (11,)
+    assert txn.plan.items[0].work_class is WorkClass.DECODE
+
+    batch = BatchBuilder(max_model_len=8).prepare(
+        txn.plan,
+        (scheduler.get_request(11),),
+    )
+    scheduler.mark_dispatched(txn, now_ns=4)
+    scheduler.commit_step(
+        txn,
+        CpuFakeExecutor(token_id=99).execute(batch),
+        now_ns=5,
+    )
+
+    assert scheduler.get_request(11).status is RequestStatus.FINISHED
+    assert scheduler.kv_manager.allocator.free_page_count == 1
+
+    scheduler.apply_commands((), now_ns=6)
+    next_txn = scheduler.begin_step(now_ns=6)
+
+    assert next_txn is not None
+    assert not next_txn.kv_fallback
+    assert tuple(
+        item.request_id for item in next_txn.plan.items
+    ) == (10,)
+
+    scheduler.rollback(next_txn)
+
+
+def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
+    scheduler = make_scheduler(
+        active=2,
+        rows=2,
+        tokens=8,
+        chunk=8,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=1,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=5),
+            command(1, 11, prompt_len=1),
+        ),
+        now_ns=0,
+    )
+
+    txn = scheduler.begin_step(now_ns=0)
+
+    assert txn is not None
+    assert txn.kv_fallback
+    assert tuple(
+        item.request_id for item in txn.plan.items
+    ) == (11,)
+    assert txn.plan.items[0].request_slot == 0
+
+    scheduler.rollback(txn)
+    assert scheduler.waiting_request_ids == (10, 11)
+
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+    assert txn.kv_fallback
+
+    batch = BatchBuilder(max_model_len=8).prepare(
+        txn.plan,
+        (scheduler.get_request(11),),
+    )
+    scheduler.mark_dispatched(txn, now_ns=1)
+
+    assert scheduler.waiting_request_ids == (10,)
+    assert scheduler.get_request(11).active_slot == 0
+    assert scheduler.get_request(10).active_slot is None
+
+    scheduler.commit_step(
+        txn,
+        CpuFakeExecutor(token_id=99).execute(batch),
+        now_ns=2,
     )

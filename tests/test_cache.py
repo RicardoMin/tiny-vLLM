@@ -527,3 +527,21 @@ def test_kv_append_rejects_invalid_fields(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         KvAppend(*args)
+
+
+def test_required_new_pages_is_a_pure_capacity_query() -> None:
+    manager = KvPageManager(page_size=4, num_pages=2)
+    before = manager.allocator.snapshot()
+
+    assert manager.free_page_count == 2
+    assert manager.required_new_pages(
+        KvAppend(10, 0, 3)
+    ) == 1
+    assert manager.allocator.snapshot() == before
+
+    _commit(manager, 1, KvAppend(10, 0, 3))
+
+    assert manager.required_new_pages(
+        KvAppend(10, 3, 1)
+    ) == 0
+    assert manager.free_page_count == 1

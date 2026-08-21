@@ -62,6 +62,7 @@ class ScheduleTxn:
     plan: StepPlan
     kv: KvPlanTxn
     rotate_prefill: bool = False
+    kv_fallback: bool = False
     state: TxnState = field(default=TxnState.PREPARED, init=False)
 
 
@@ -414,8 +415,31 @@ class Scheduler:
             ),
         )
 
-        if kv_txn is None:
-            return None
+        kv_fallback = kv_txn is None
+        if kv_fallback:
+            items = self._fit_kv_capacity(items)
+            if not items:
+                return None
+
+            plan = StepPlan(
+                plan_id=plan.plan_id,
+                items=tuple(items),
+            )
+            kv_txn = self._kv_manager.begin_plan(
+                plan_id=plan.plan_id,
+                appends=tuple(
+                    KvAppend(
+                        request_id=item.request_id,
+                        token_start=item.token_start,
+                        query_len=item.query_len,
+                    )
+                    for item in plan.items
+                ),
+            )
+            if kv_txn is None:
+                raise RuntimeError(
+                    "KV fallback selected an over-capacity batch"
+                )
 
         txn = ScheduleTxn(
             plan=plan,
@@ -423,6 +447,7 @@ class Scheduler:
             rotate_prefill=(
                 has_active_prefill and has_waiting_prefill
             ),
+            kv_fallback=kv_fallback,
         )
         self._next_plan_id += 1
         self._open_txn = txn
@@ -451,9 +476,17 @@ class Scheduler:
                 request = self._requests[item.request_id]
 
                 if item.work_class is WorkClass.DECODE:
-                    self._decode_ids.popleft()
+                    self._pop_ready(
+                        self._decode_ids,
+                        request.request_id,
+                        txn.kv_fallback,
+                    )
                 elif request.status is RequestStatus.WAITING:
-                    self._waiting_ids.popleft()
+                    self._pop_ready(
+                        self._waiting_ids,
+                        request.request_id,
+                        txn.kv_fallback,
+                    )
                     request.status = RequestStatus.RUNNING
                     request.active_slot = item.request_slot
                     self._slot_request_ids[item.request_slot] = (
@@ -463,7 +496,11 @@ class Scheduler:
                     if request.admitted_ns is None:
                         request.admitted_ns = now_ns
                 else:
-                    self._prefill_ids.popleft()
+                    self._pop_ready(
+                        self._prefill_ids,
+                        request.request_id,
+                        txn.kv_fallback,
+                    )
 
                 request.inflight_plan_id = plan_id
 
@@ -591,6 +628,59 @@ class Scheduler:
             for slot, request_id in enumerate(self._slot_request_ids)
             if request_id is None
         )
+
+    @staticmethod
+    def _pop_ready(
+        ready_ids: deque[int],
+        request_id: int,
+        kv_fallback: bool,
+    ) -> None:
+        if kv_fallback:
+            ready_ids.remove(request_id)
+        else:
+            ready_ids.popleft()
+
+    def _fit_kv_capacity(
+        self,
+        items: list[WorkItem],
+    ) -> list[WorkItem]:
+        remaining_pages = self._kv_manager.free_page_count
+        selected: list[WorkItem] = []
+
+        for item in items:
+            append = KvAppend(
+                request_id=item.request_id,
+                token_start=item.token_start,
+                query_len=item.query_len,
+            )
+            new_pages = self._kv_manager.required_new_pages(append)
+
+            if new_pages > remaining_pages:
+                continue
+
+            selected.append(item)
+            remaining_pages -= new_pages
+
+        if not selected:
+            return []
+
+        free_slots = self._free_slots()
+        compacted: list[WorkItem] = []
+
+        for item in selected:
+            request = self._requests[item.request_id]
+
+            if request.status is RequestStatus.WAITING:
+                item = self._make_work_item(
+                    request,
+                    next(free_slots),
+                    item.work_class,
+                    item.query_len,
+                )
+
+            compacted.append(item)
+
+        return compacted
 
     def _make_work_item(
         self,
