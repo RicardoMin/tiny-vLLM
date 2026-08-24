@@ -362,6 +362,7 @@ def test_mark_dispatched_publishes_runtime_ownership() -> None:
             scheduler.get_request(item.request_id)
             for item in txn.plan.items
         ),
+        kv=txn.kv,
     )
     assert batch.plan_id == txn.plan.plan_id
 
@@ -419,6 +420,7 @@ def _run_fake_step(scheduler: Scheduler):
             scheduler.get_request(item.request_id)
             for item in txn.plan.items
         ),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=1)
 
@@ -587,6 +589,7 @@ def _commit_fake_step(scheduler: Scheduler, now_ns: int):
             scheduler.get_request(item.request_id)
             for item in txn.plan.items
         ),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=now_ns + 1)
     result = CpuFakeExecutor(token_id=99).execute(batch)
@@ -680,6 +683,7 @@ def test_model_limit_finishes_without_an_invalid_decode() -> None:
     batch = BatchBuilder(max_model_len=3).prepare(
         txn.plan,
         (scheduler.get_request(10),),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=1)
     finished_ids = scheduler.commit_step(
@@ -746,6 +750,7 @@ def test_mixed_active_and_waiting_share_budgets() -> None:
             scheduler.get_request(item.request_id)
             for item in txn.plan.items
         ),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=4)
 
@@ -986,6 +991,7 @@ def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
         BatchBuilder(max_model_len=2).prepare(
             txn.plan,
             (scheduler.get_request(10),),
+            kv=txn.kv,
         )
 
     scheduler.rollback(txn)
@@ -1034,6 +1040,7 @@ def test_kv_fallback_runs_decode_that_reuses_a_partial_page() -> None:
     batch = BatchBuilder(max_model_len=8).prepare(
         txn.plan,
         (scheduler.get_request(11),),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=4)
     scheduler.commit_step(
@@ -1094,6 +1101,7 @@ def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
     batch = BatchBuilder(max_model_len=8).prepare(
         txn.plan,
         (scheduler.get_request(11),),
+        kv=txn.kv,
     )
     scheduler.mark_dispatched(txn, now_ns=1)
 
@@ -1106,3 +1114,36 @@ def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
         CpuFakeExecutor(token_id=99).execute(batch),
         now_ns=2,
     )
+
+
+def test_scheduler_kv_plan_can_be_lowered_into_prepared_batch() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        rows=1,
+        tokens=4,
+        chunk=4,
+        model_len=8,
+        kv_page_size=4,
+        kv_num_pages=2,
+    )
+
+    scheduler.apply_commands(
+        (command(0, 10, prompt_len=3),),
+        now_ns=0,
+    )
+
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+
+    batch = BatchBuilder(max_model_len=8).prepare(
+        txn.plan,
+        (scheduler.get_request(10),),
+        kv=txn.kv,
+    )
+
+    assert batch.has_kv_metadata
+    assert batch.kv_page_table_ids == (0,)
+    assert batch.kv_page_table_offsets == (0, 1)
+    assert batch.kv_slot_mapping == (0, 1, 2)
+
+    scheduler.rollback(txn)

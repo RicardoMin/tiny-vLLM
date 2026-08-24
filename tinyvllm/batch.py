@@ -11,6 +11,7 @@ from tinyvllm.request import (
 
 from tinyvllm._validation import _check_positive_int
 
+from tinyvllm.cache import KvPlanTxn
 
 class StepMode(Enum):
     PREFILL_ONLY = auto()
@@ -115,6 +116,10 @@ class PreparedBatch:
     sample_request_ids: tuple[int, ...]
     sampling_params: tuple[SamplingParams, ...]
 
+    kv_page_table_ids: tuple[int, ...] = ()
+    kv_page_table_offsets: tuple[int, ...] = ()
+    kv_slot_mapping: tuple[int, ...] = ()
+
 
     @property
     def num_items(self) -> int:
@@ -131,6 +136,10 @@ class PreparedBatch:
     @property
     def num_decode_tokens(self) -> int:
         return self.q_offsets[self.num_decode_items]
+
+    @property
+    def has_kv_metadata(self) -> bool:
+        return bool(self.kv_page_table_offsets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,11 +177,18 @@ class BatchBuilder:
     def prepare(
         self,
         plan: StepPlan,
-        requests: tuple[RequestState, ...]
+        requests: tuple[RequestState, ...],
+        *,
+        kv: KvPlanTxn | None = None,
     ) -> PreparedBatch:
         if len(requests) != len(plan.items):
             raise ValueError(
                 "requests must align with plan items"
+            )
+
+        if kv is not None and kv.plan_id != plan.plan_id:
+            raise ValueError(
+                "KV plan_id does not match step plan"
             )
 
         input_ids: list[int] = []
@@ -187,6 +203,10 @@ class BatchBuilder:
         sample_token_indices: list[int] = []
         sample_request_ids: list[int] = []
         sampling_params: list[SamplingParams] = []
+
+        kv_page_table_ids: list[int] = []
+        kv_page_table_offsets = [0] if kv is not None else []
+        kv_slot_mapping: list[int] = []
 
         for item, request in zip(plan.items, requests):
             if request.request_id != item.request_id:
@@ -207,6 +227,27 @@ class BatchBuilder:
                 raise RuntimeError(
                     "token slice length does not match query_len"
                 )
+
+            if kv is not None:
+                page_table = kv.staged_page_table(
+                    item.request_id
+                )
+                slot_mapping = kv.slot_mapping(
+                    item.request_id
+                )
+
+                if len(slot_mapping) != item.query_len:
+                    raise RuntimeError(
+                        "KV slot mapping length does not match query_len"
+                    )
+
+                kv_page_table_ids.extend(
+                    ref.page_id for ref in page_table
+                )
+                kv_page_table_offsets.append(
+                    len(kv_page_table_ids)
+                )
+                kv_slot_mapping.extend(slot_mapping)
 
             input_ids.extend(tokens)
             positions.extend(
@@ -235,6 +276,11 @@ class BatchBuilder:
                 sample_request_ids.append(item.request_id)
                 sampling_params.append(request.sampling)
 
+        if kv is not None and len(kv_slot_mapping) != len(input_ids):
+            raise RuntimeError(
+                "KV slot mapping length does not match query token count"
+            )
+
         return PreparedBatch(
             plan_id=plan.plan_id,
             mode=plan.mode,
@@ -249,4 +295,7 @@ class BatchBuilder:
             sample_token_indices=tuple(sample_token_indices),
             sample_request_ids=tuple(sample_request_ids),
             sampling_params=tuple(sampling_params),
+            kv_page_table_ids=tuple(kv_page_table_ids),
+            kv_page_table_offsets=tuple(kv_page_table_offsets),
+            kv_slot_mapping=tuple(kv_slot_mapping),
         )

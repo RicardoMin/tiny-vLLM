@@ -19,6 +19,12 @@ from tinyvllm.request import (
     WorkClass,
 )
 
+from tinyvllm.cache import (
+    KvAppend,
+    KvPageManager,
+    KvTxnState,
+)
+
 
 def prefill_item(
     request_id: int = 1,
@@ -281,3 +287,161 @@ def test_fake_executor_returns_empty_partial_prefill_result() -> None:
 
     assert result.sample_request_ids == ()
     assert result.sampled_token_ids == ()
+
+
+def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
+    manager = KvPageManager(page_size=4, num_pages=4)
+
+    initial = manager.begin_plan(
+        plan_id=1,
+        appends=(KvAppend(2, 0, 3),),
+    )
+    assert initial is not None
+    initial.commit_before_dispatch()
+    initial.complete_writes()
+
+    decode = running_decode_request()
+    prefill = waiting_request(
+        request_id=1,
+        prompt=(21, 22, 23),
+    )
+
+    plan = StepPlan(
+        plan_id=2,
+        items=(decode_item(), prefill_item()),
+    )
+
+    txn = manager.begin_plan(
+        plan_id=plan.plan_id,
+        appends=(
+            KvAppend(2, 3, 1),
+            KvAppend(1, 0, 3),
+        ),
+    )
+    assert txn is not None
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        plan,
+        (decode, prefill),
+        kv=txn,
+    )
+
+    assert batch.has_kv_metadata
+    assert batch.kv_page_table_ids == (0, 1)
+    assert batch.kv_page_table_offsets == (0, 1, 2)
+    assert batch.kv_slot_mapping == (3, 4, 5, 6)
+
+    for index, expected in enumerate(((0,), (1,))):
+        start = batch.kv_page_table_offsets[index]
+        end = batch.kv_page_table_offsets[index + 1]
+        assert batch.kv_page_table_ids[start:end] == expected
+
+    txn.rollback()
+
+
+def test_builder_rejects_kv_metadata_from_another_plan() -> None:
+    manager = KvPageManager(page_size=4, num_pages=2)
+
+    txn = manager.begin_plan(
+        plan_id=20,
+        appends=(KvAppend(1, 0, 1),),
+    )
+    assert txn is not None
+
+    with pytest.raises(ValueError, match="plan_id"):
+        BatchBuilder(max_model_len=16).prepare(
+            StepPlan(
+                plan_id=21,
+                items=(prefill_item(),),
+            ),
+            (waiting_request(),),
+            kv=txn,
+        )
+
+    txn.rollback()
+
+
+def test_builder_prepare_keeps_kv_transaction_read_only() -> None:
+    manager = KvPageManager(page_size=4, num_pages=3)
+
+    txn = manager.begin_plan(
+        plan_id=30,
+        appends=(KvAppend(1, 0, 3),),
+    )
+    assert txn is not None
+
+    before_allocator = manager.allocator.snapshot()
+    before_table = manager.page_table(1)
+    before_valid = manager.valid_token_count(1)
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        StepPlan(
+            plan_id=30,
+            items=(prefill_item(request_id=1, slot=0),),
+        ),
+        (
+            waiting_request(
+                request_id=1,
+                prompt=(21, 22, 23),
+            ),
+        ),
+        kv=txn,
+    )
+
+    assert batch.has_kv_metadata
+    assert txn.state is KvTxnState.PREPARED
+    assert manager.allocator.snapshot() == before_allocator
+    assert manager.page_table(1) == before_table
+    assert manager.valid_token_count(1) == before_valid
+
+    txn.rollback()
+
+
+def test_builder_keeps_partial_page_slots_when_page_table_grows() -> None:
+    manager = KvPageManager(page_size=4, num_pages=4)
+
+    first = manager.begin_plan(
+        plan_id=40,
+        appends=(KvAppend(1, 0, 3),),
+    )
+    assert first is not None
+    first.commit_before_dispatch()
+    first.complete_writes()
+
+    second = manager.begin_plan(
+        plan_id=41,
+        appends=(KvAppend(1, 3, 3),),
+    )
+    assert second is not None
+
+    request = waiting_request(
+        request_id=1,
+        prompt=(21, 22, 23, 24, 25, 26),
+    )
+
+    plan = StepPlan(
+        plan_id=41,
+        items=(
+            WorkItem(
+                request_id=1,
+                request_slot=0,
+                work_class=WorkClass.PREFILL,
+                token_start=3,
+                query_len=3,
+                context_len_before=3,
+                should_sample=True,
+            ),
+        ),
+    )
+
+    batch = BatchBuilder(max_model_len=16).prepare(
+        plan,
+        (request,),
+        kv=second,
+    )
+
+    assert batch.kv_page_table_ids == (0, 1)
+    assert batch.kv_page_table_offsets == (0, 2)
+    assert batch.kv_slot_mapping == (3, 4, 5)
+
+    second.rollback()
