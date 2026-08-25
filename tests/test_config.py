@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tinyvllm import EngineConfig
+from tinyvllm.config import EngineConfig
 
 
 def model_dir(tmp_path):

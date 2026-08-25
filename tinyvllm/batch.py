@@ -276,11 +276,6 @@ class BatchBuilder:
                 sample_request_ids.append(item.request_id)
                 sampling_params.append(request.sampling)
 
-        if kv is not None and len(kv_slot_mapping) != len(input_ids):
-            raise RuntimeError(
-                "KV slot mapping length does not match query token count"
-            )
-
         return PreparedBatch(
             plan_id=plan.plan_id,
             mode=plan.mode,
