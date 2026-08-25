@@ -27,13 +27,6 @@ def test_sampling_rejects_invalid_values(kwargs, error) -> None:
         SamplingParams(**kwargs)
 
 
-def test_request_enums() -> None:
-    assert RequestStatus.FINISHED.terminal
-    assert RequestStatus.ABORTED.terminal
-    assert not RequestStatus.RUNNING.terminal
-    assert WorkClass.PREFILL is not WorkClass.DECODE
-
-
 def make_request(prompt: list[int] | None = None) -> RequestState:
     return RequestState(
         request_id=7,

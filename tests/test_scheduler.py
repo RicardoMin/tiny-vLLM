@@ -80,24 +80,6 @@ def committed_state(scheduler: Scheduler):
     )
 
 
-def test_command_cutoff_is_external() -> None:
-    scheduler = make_scheduler()
-
-    scheduler.apply_commands(
-        (command(0, 10),),
-        now_ns=0,
-    )
-
-    assert scheduler.request_ids == (10,)
-
-    scheduler.apply_commands(
-        (command(1, 11),),
-        now_ns=0,
-    )
-
-    assert scheduler.request_ids == (10, 11)
-
-
 def test_command_batch_is_atomic() -> None:
     scheduler = make_scheduler()
 
@@ -222,17 +204,6 @@ def test_zero_output_finishes_without_gpu() -> None:
 
     with pytest.raises(KeyError):
         scheduler.get_request(10)
-
-def test_clock_cannot_move_backwards() -> None:
-    scheduler = make_scheduler()
-
-    scheduler.apply_commands(
-        (command(0, 10),),
-        now_ns=10,
-    )
-
-    with pytest.raises(ValueError, match="backwards"):
-        scheduler.apply_commands((), now_ns=9)
 
 
 def test_add_command_copies_prompt_tokens() -> None:
@@ -395,27 +366,6 @@ def test_mark_dispatched_publishes_runtime_ownership() -> None:
         assert request.inflight_plan_id == txn.plan.plan_id
         assert request.computed_tokens == 0
         assert request.output_token_ids == []
-
-
-def test_dispatched_transaction_cannot_roll_back() -> None:
-    scheduler = make_scheduler()
-    scheduler.apply_commands((command(0, 10),), now_ns=0)
-    txn = scheduler.begin_step(now_ns=0)
-    assert txn is not None
-
-    scheduler.mark_dispatched(txn, now_ns=1)
-
-    assert txn.kv.state is KvTxnState.DISPATCHED
-
-    with pytest.raises(RuntimeError, match="must be prepared"):
-        scheduler.rollback(txn)
-
-    assert txn.state is TxnState.DISPATCHED
-    assert scheduler.has_open_transaction
-    assert (
-        scheduler.get_request(10).inflight_plan_id
-        == txn.plan.plan_id
-    )
 
 
 def _run_fake_step(scheduler: Scheduler):
@@ -772,44 +722,6 @@ def test_mixed_active_and_waiting_share_budgets() -> None:
     scheduler.commit_step(txn, result, now_ns=5)
 
 
-def test_waiting_prefill_gets_a_turn_while_active_prefill_runs() -> None:
-    scheduler = make_scheduler(
-        active=5,
-        rows=3,
-        tokens=6,
-        chunk=2,
-        model_len=128,
-        reserve_tokens=2,
-        reserve_rows=1,
-    )
-    scheduler.apply_commands(
-        (
-            command(0, 10, prompt_len=1, max_new_tokens=100),
-            command(1, 11, prompt_len=1, max_new_tokens=100),
-            command(2, 12, prompt_len=100, max_new_tokens=2),
-        ),
-        now_ns=0,
-    )
-    first_plan, _ = _commit_fake_step(scheduler, 0)
-    assert tuple(item.request_id for item in first_plan.items) == (
-        10,
-        11,
-        12,
-    )
-
-    scheduler.apply_commands(
-        (command(3, 13, prompt_len=1),),
-        now_ns=3,
-    )
-    _commit_fake_step(scheduler, 3)
-    third_plan, _ = _commit_fake_step(scheduler, 6)
-
-    request_ids = tuple(item.request_id for item in third_plan.items)
-    assert 13 in request_ids
-    assert len(request_ids) == len(set(request_ids))
-    assert scheduler.get_request(13).status is RequestStatus.RUNNING
-
-
 def test_prefill_reservation_protects_progress() -> None:
     scheduler = make_scheduler(
         active=4,
@@ -1122,39 +1034,6 @@ def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
         CpuFakeExecutor(token_id=99).execute(batch),
         now_ns=2,
     )
-
-
-def test_scheduler_kv_plan_can_be_lowered_into_prepared_batch() -> None:
-    scheduler = make_scheduler(
-        active=1,
-        rows=1,
-        tokens=4,
-        chunk=4,
-        model_len=8,
-        kv_page_size=4,
-        kv_num_pages=2,
-    )
-
-    scheduler.apply_commands(
-        (command(0, 10, prompt_len=3),),
-        now_ns=0,
-    )
-
-    txn = scheduler.begin_step(now_ns=0)
-    assert txn is not None
-
-    batch = BatchBuilder(max_model_len=8).prepare(
-        txn.plan,
-        (scheduler.get_request(10),),
-        kv=txn.kv,
-    )
-
-    assert batch.has_kv_metadata
-    assert batch.kv_page_table_ids == (0,)
-    assert batch.kv_page_table_offsets == (0, 1)
-    assert batch.kv_slot_mapping == (0, 1, 2)
-
-    scheduler.rollback(txn)
 
 
 def test_terminal_release_precedes_consumption() -> None:

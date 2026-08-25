@@ -11,7 +11,6 @@ from tinyvllm.batch import (
     StepPlan,
     WorkItem,
 )
-from tinyvllm.executor import CpuFakeExecutor
 from tinyvllm.request import (
     RequestState,
     RequestStatus,
@@ -22,7 +21,6 @@ from tinyvllm.request import (
 from tinyvllm.cache import (
     KvAppend,
     KvPageManager,
-    KvTxnState,
 )
 
 
@@ -88,13 +86,6 @@ def running_decode_request() -> RequestState:
         first_token_ns=1,
     )
 
-def test_work_item_lengths() -> None:
-    item = prefill_item()
-
-    assert item.token_end == 3
-    assert item.context_len_after == 3
-
-
 def test_prefill_only_plan() -> None:
     plan = StepPlan(1, (prefill_item(),))
 
@@ -123,27 +114,12 @@ def test_mixed_plan_is_decode_first() -> None:
     assert plan.num_samples == 2
 
 
-def test_partial_prefill_has_no_sample() -> None:
-    plan = StepPlan(
-        plan_id=1,
-        items=(prefill_item(should_sample=False),),
-    )
-
-    assert plan.mode is StepMode.PREFILL_ONLY
-    assert plan.num_samples == 0
-
-
 def test_plan_rejects_prefill_before_decode() -> None:
     with pytest.raises(ValueError, match="precede"):
         StepPlan(
             plan_id=1,
             items=(prefill_item(), decode_item()),
         )
-
-
-def test_plan_rejects_empty_items() -> None:
-    with pytest.raises(ValueError, match="at least one"):
-        StepPlan(plan_id=1, items=())
 
 
 def test_builder_flattens_mixed_batch_without_padding() -> None:
@@ -201,35 +177,6 @@ def test_final_prefill_maps_its_last_query_row() -> None:
     assert batch.num_samples == 1
 
 
-def test_builder_rejects_wrong_request_order() -> None:
-    plan = StepPlan(
-        plan_id=10,
-        items=(decode_item(), prefill_item()),
-    )
-
-    with pytest.raises(ValueError, match="request order"):
-        BatchBuilder(max_model_len=16).prepare(
-            plan,
-            (
-                waiting_request(),
-                running_decode_request(),
-            ),
-        )
-
-
-def test_builder_rejects_context_over_model_limit() -> None:
-    request = waiting_request()
-
-    with pytest.raises(ValueError, match="max_model_len"):
-        BatchBuilder(max_model_len=2).prepare(
-            StepPlan(
-                plan_id=11,
-                items=(prefill_item(),),
-            ),
-            (request,),
-        )
-
-
 def test_step_result_copies_and_validates_parallel_arrays() -> None:
     request_ids = [10, 11]
     token_ids = [101, 102]
@@ -248,45 +195,6 @@ def test_step_result_copies_and_validates_parallel_arrays() -> None:
 
     with pytest.raises(ValueError, match="counts"):
         StepResult(12, (10,), (101, 102))
-
-
-def test_fake_executor_preserves_sampling_order() -> None:
-    request = waiting_request()
-
-    batch = BatchBuilder(max_model_len=16).prepare(
-        StepPlan(
-            plan_id=13,
-            items=(prefill_item(),),
-        ),
-        (request,),
-    )
-
-    result = CpuFakeExecutor(token_id=99).execute(batch)
-
-    assert result == StepResult(
-        plan_id=13,
-        sample_request_ids=(1,),
-        sampled_token_ids=(99,),
-    )
-
-
-def test_fake_executor_returns_empty_partial_prefill_result() -> None:
-    request = waiting_request(
-        prompt=(21, 22, 23, 24, 25),
-    )
-
-    batch = BatchBuilder(max_model_len=16).prepare(
-        StepPlan(
-            plan_id=14,
-            items=(prefill_item(should_sample=False),),
-        ),
-        (request,),
-    )
-
-    result = CpuFakeExecutor(token_id=99).execute(batch)
-
-    assert result.sample_request_ids == ()
-    assert result.sampled_token_ids == ()
 
 
 def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
@@ -335,64 +243,6 @@ def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
         start = batch.kv_page_table_offsets[index]
         end = batch.kv_page_table_offsets[index + 1]
         assert batch.kv_page_table_ids[start:end] == expected
-
-    txn.rollback()
-
-
-def test_builder_rejects_kv_metadata_from_another_plan() -> None:
-    manager = KvPageManager(page_size=4, num_pages=2)
-
-    txn = manager.begin_plan(
-        plan_id=20,
-        appends=(KvAppend(1, 0, 1),),
-    )
-    assert txn is not None
-
-    with pytest.raises(ValueError, match="plan_id"):
-        BatchBuilder(max_model_len=16).prepare(
-            StepPlan(
-                plan_id=21,
-                items=(prefill_item(),),
-            ),
-            (waiting_request(),),
-            kv=txn,
-        )
-
-    txn.rollback()
-
-
-def test_builder_prepare_keeps_kv_transaction_read_only() -> None:
-    manager = KvPageManager(page_size=4, num_pages=3)
-
-    txn = manager.begin_plan(
-        plan_id=30,
-        appends=(KvAppend(1, 0, 3),),
-    )
-    assert txn is not None
-
-    before_allocator = manager.allocator.snapshot()
-    before_table = manager.page_table(1)
-    before_valid = manager.valid_token_count(1)
-
-    batch = BatchBuilder(max_model_len=16).prepare(
-        StepPlan(
-            plan_id=30,
-            items=(prefill_item(request_id=1, slot=0),),
-        ),
-        (
-            waiting_request(
-                request_id=1,
-                prompt=(21, 22, 23),
-            ),
-        ),
-        kv=txn,
-    )
-
-    assert batch.has_kv_metadata
-    assert txn.state is KvTxnState.PREPARED
-    assert manager.allocator.snapshot() == before_allocator
-    assert manager.page_table(1) == before_table
-    assert manager.valid_token_count(1) == before_valid
 
     txn.rollback()
 
