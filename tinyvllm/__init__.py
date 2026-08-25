@@ -1,5 +1,5 @@
-from tinyvllm.config import EngineConfig
 from tinyvllm.request import (
+    CompletionEvent,
     RequestState,
     RequestStatus,
     SamplingParams,
@@ -7,6 +7,7 @@ from tinyvllm.request import (
 )
 
 __all__ = [
+    "CompletionEvent",
     "EngineConfig",
     "RequestState",
     "RequestStatus",

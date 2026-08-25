@@ -6,6 +6,7 @@ from heapq import heappop, heappush
 
 from tinyvllm.batch import StepPlan, StepResult, WorkItem
 from tinyvllm.request import (
+    CompletionEvent,
     RequestState,
     RequestStatus,
     SamplingParams,
@@ -138,7 +139,7 @@ class Scheduler:
         self._slot_request_ids: list[int | None] = (
             [None] * max_active_requests
         )
-        self._immediate_finished_ids: list[int] = []
+        self._completion_events: deque[CompletionEvent] = deque()
 
         self._last_command_seq = -1
         self._now_ns: int | None = None
@@ -154,6 +155,7 @@ class Scheduler:
 
     @property
     def request_ids(self) -> tuple[int, ...]:
+        """Includes terminal requests whose results whose results are not consumed yet."""
         return tuple(self._requests)
 
 
@@ -172,14 +174,41 @@ class Scheduler:
         return self._kv_manager
 
 
+    @property
+    def completed_request_ids(self) -> tuple[int, ...]:
+        return tuple(
+            event.request_id
+            for event in self._completion_events
+        )
+
+
     def get_request(self, request_id: int) -> RequestState:
         return self._requests[request_id]
 
 
-    def take_immediate_finished_request_ids(self) -> tuple[int, ...]:
-        request_ids = tuple(self._immediate_finished_ids)
-        self._immediate_finished_ids.clear()
-        return request_ids
+    def consume_finished(
+        self,
+        max_items: int | None = None,
+    ) -> tuple[CompletionEvent, ...]:
+        if max_items is not None:
+            _check_non_negative_int("max_items", max_items)
+
+            if max_items == 0:
+                return ()
+
+        count = len(self._completion_events)
+
+        if max_items is not None:
+            count = min(count, max_items)
+
+        events: list[CompletionEvent] = []
+
+        for _ in range(count):
+            event = self._completion_events.popleft()
+            del self._requests[event.request_id]
+            events.append(event)
+
+        return tuple(events)
 
 
     def apply_commands(
@@ -226,7 +255,7 @@ class Scheduler:
             request = RequestState(
                 request_id=command.request_id,
                 submit_seq=command.seq,
-                prompt_token_ids=list(command.prompt_token_ids),
+                prompt_token_ids=command.prompt_token_ids,
                 sampling=command.sampling,
                 arrival_ns=command.arrival_ns,
             )
@@ -577,16 +606,13 @@ class Scheduler:
                     request.remaining_new_tokens == 0
                     or request.computed_tokens >= self.max_model_len
                 ):
-                    self._slot_request_ids[item.request_slot] = None
-                    request.active_slot = None
-                    request.status = RequestStatus.FINISHED
-                    request.finished_ns = now_ns
+                    self._finish_request(
+                        request,
+                        now_ns,
+                    )
                     finished_ids.append(request.request_id)
                 else:
                     self._decode_ids.append(request.request_id)
-
-            for request_id in finished_ids:
-                self._kv_manager.release_request(request_id)
 
             if txn.rotate_prefill and plan.num_prefill_items:
                 self._prefer_waiting_prefill = (
@@ -759,6 +785,28 @@ class Scheduler:
             used_tokens,
         )
 
+
+    def _finish_request(
+        self,
+        request: RequestState,
+        now_ns: int,
+    ) -> None:
+        request.status = RequestStatus.FINISHED
+        request.finished_ns = now_ns
+        request.inflight_plan_id = None
+
+        event = CompletionEvent.from_request(request)
+
+        if request.active_slot is not None:
+            self._slot_request_ids[request.active_slot] = None
+            request.active_slot = None
+
+        self._kv_manager.release_request(
+            request.request_id
+        )
+
+        self._completion_events.append(event)
+
     def _promote_arrivals(self, now_ns: int) -> None:
         while (
             self._pending_arrivals
@@ -771,12 +819,10 @@ class Scheduler:
                 continue
 
             if request.sampling.max_new_tokens == 0:
-                request.status = RequestStatus.FINISHED
                 request.admitted_ns = now_ns
-                request.finished_ns = now_ns
-
-                self._immediate_finished_ids.append(
-                    request.request_id
+                self._finish_request(
+                    request,
+                    now_ns,
                 )
             else:
                 request.status = RequestStatus.WAITING

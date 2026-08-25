@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from tinyvllm.request import (
+    CompletionEvent,
     RequestStatus,
     SamplingParams,
     WorkClass
@@ -204,16 +205,23 @@ def test_zero_output_finishes_without_gpu() -> None:
     assert request.admitted_ns == 0
     assert request.finished_ns == 0
 
-    assert (
-        scheduler.take_immediate_finished_request_ids()
-        == (10,)
-    )
-    assert (
-        scheduler.take_immediate_finished_request_ids()
-        == ()
-    )
+    assert scheduler.completed_request_ids == (10,)
     assert scheduler.begin_step(now_ns=0) is None
 
+    events = scheduler.consume_finished()
+
+    assert len(events) == 1
+    assert isinstance(events[0], CompletionEvent)
+    assert events[0].request_id == 10
+    assert events[0].status is RequestStatus.FINISHED
+    assert events[0].output_token_ids == ()
+
+    assert scheduler.completed_request_ids == ()
+    assert scheduler.request_ids == ()
+    assert scheduler.consume_finished() == ()
+
+    with pytest.raises(KeyError):
+        scheduler.get_request(10)
 
 def test_clock_cannot_move_backwards() -> None:
     scheduler = make_scheduler()
@@ -1147,3 +1155,102 @@ def test_scheduler_kv_plan_can_be_lowered_into_prepared_batch() -> None:
     assert batch.kv_slot_mapping == (0, 1, 2)
 
     scheduler.rollback(txn)
+
+
+def test_terminal_release_precedes_consumption() -> None:
+    scheduler = make_scheduler(
+        active=1,
+        tokens=4,
+        chunk=4,
+        kv_page_size=2,
+        kv_num_pages=4,
+    )
+
+    total_pages = scheduler.kv_manager.allocator.num_pages
+
+    scheduler.apply_commands(
+        (
+            command(
+                0,
+                10,
+                prompt_len=3,
+                max_new_tokens=1,
+            ),
+        ),
+        now_ns=0,
+    )
+
+    _, finished_ids = _commit_fake_step(
+        scheduler,
+        now_ns=0,
+    )
+
+    assert finished_ids == (10,)
+    assert scheduler.get_request(
+        10
+    ).status is RequestStatus.FINISHED
+
+    # KV is released before the result is consumed.
+    assert scheduler.kv_manager.page_table(10) == ()
+    assert scheduler.kv_manager.valid_token_count(10) == 0
+    assert scheduler.kv_manager.free_page_count == total_pages
+
+    assert scheduler.completed_request_ids == (10,)
+
+    events = scheduler.consume_finished()
+
+    assert len(events) == 1
+    assert events[0].request_id == 10
+    assert events[0].output_token_ids == (99,)
+
+    assert scheduler.request_ids == ()
+    assert scheduler.completed_request_ids == ()
+
+
+def test_consume_finished_is_fifo_and_bounded() -> None:
+    scheduler = make_scheduler(active=2)
+
+    scheduler.apply_commands(
+        (
+            command(
+                0,
+                10,
+                max_new_tokens=0,
+            ),
+            command(
+                1,
+                11,
+                max_new_tokens=0,
+            ),
+        ),
+        now_ns=0,
+    )
+
+    assert scheduler.completed_request_ids == (10, 11)
+    assert scheduler.consume_finished(max_items=0) == ()
+
+    first = scheduler.consume_finished(max_items=1)
+
+    assert tuple(
+        event.request_id
+        for event in first
+    ) == (10,)
+    assert scheduler.request_ids == (11,)
+
+    with pytest.raises(FrozenInstanceError):
+        first[0].request_id = 99
+
+    second = scheduler.consume_finished()
+
+    assert tuple(
+        event.request_id
+        for event in second
+    ) == (11,)
+    assert scheduler.request_ids == ()
+    assert scheduler.consume_finished() == ()
+
+    with pytest.raises(ValueError):
+        scheduler.consume_finished(max_items=-1)
+
+    with pytest.raises(TypeError):
+        scheduler.consume_finished(max_items=True)

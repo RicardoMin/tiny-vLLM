@@ -144,3 +144,80 @@ class RequestState:
     @property
     def remaining_new_tokens(self) -> int:
         return self.sampling.max_new_tokens - self.num_output_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionEvent:
+    """Immutable terminal result delivered by the scheduler."""
+
+    request_id: int
+    status: RequestStatus
+    output_token_ids: tuple[int, ...]
+    prompt_token_count: int
+    submit_seq: int
+    arrival_ns: int
+    admitted_ns: int | None
+    first_token_ns: int | None
+    finished_ns: int
+    computed_tokens: int
+
+    def __post_init__(self) -> None:
+        _check_non_negative_int("request_id", self.request_id)
+        _check_non_negative_int("prompt_token_count", self.prompt_token_count)
+        _check_non_negative_int("submit_seq", self.submit_seq)
+        _check_non_negative_int("arrival_ns", self.arrival_ns)
+        _check_non_negative_int("finished_ns", self.finished_ns)
+        _check_non_negative_int("computed_tokens", self.computed_tokens)
+
+        if not self.status.terminal:
+            raise ValueError(
+                "completion event must be terminal"
+            )
+
+        object.__setattr__(
+            self,
+            "output_token_ids",
+            tuple(self.output_token_ids),
+        )
+
+        for name in ("admitted_ns", "first_token_ns"):
+            value = getattr(self, name)
+            if value is not None:
+                _check_non_negative_int(name, value)
+
+
+    @property
+    def num_output_tokens(self) -> int:
+        return len(self.output_token_ids)
+
+    @classmethod
+    def from_request(
+        cls,
+        request: RequestState,
+    ) -> "CompletionEvent":
+        if not request.terminal:
+            raise ValueError(
+                "request is not terminal"
+            )
+
+        if request.finished_ns is None:
+            raise ValueError(
+                "terminal request must have finished_ns"
+            )
+
+        return cls(
+            request_id=request.request_id,
+            status=request.status,
+            output_token_ids=tuple(
+                request.output_token_ids
+            ),
+            prompt_token_count=len(
+                request.prompt_token_ids
+            ),
+            submit_seq=request.submit_seq,
+            arrival_ns=request.arrival_ns,
+            admitted_ns=request.admitted_ns,
+            first_token_ns=request.first_token_ns,
+            finished_ns=request.finished_ns,
+            computed_tokens=request.computed_tokens,
+        )
