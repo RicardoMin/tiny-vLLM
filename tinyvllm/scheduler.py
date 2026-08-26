@@ -589,7 +589,11 @@ class Scheduler:
                 request.inflight_plan_id = None
 
                 if not item.should_sample:
-                    self._prefill_ids.append(request.request_id)
+                    if request.computed_tokens >= self.max_model_len:
+                        self._finish_request(request, now_ns)
+                        finished_ids.append(request.request_id)
+                    else:
+                        self._prefill_ids.append(request.request_id)
                     continue
 
                 request.output_token_ids.append(
@@ -666,6 +670,24 @@ class Scheduler:
         else:
             ready_ids.popleft()
 
+
+    def _max_prefill_tokens(
+        self,
+        item: WorkItem,
+        remaining_pages: int,
+    ) -> int:
+        allocated_pages = len(
+            self._kv_manager.page_table(item.request_id)
+        )
+        tail_capacity = (
+            allocated_pages * self.kv_page_size
+            - item.token_start
+        )
+        return max(
+            0,
+            tail_capacity + remaining_pages * self.kv_page_size,
+        )
+
     def _fit_kv_capacity(
         self,
         items: list[WorkItem],
@@ -674,6 +696,29 @@ class Scheduler:
         selected: list[WorkItem] = []
 
         for item in items:
+            query_len = item.query_len
+
+            if item.work_class is WorkClass.PREFILL:
+                query_len = min(
+                    query_len,
+                    self._max_prefill_tokens(
+                        item,
+                        remaining_pages,
+                    ),
+                )
+
+            if query_len <= 0:
+                continue
+
+            if query_len != item.query_len:
+                request = self._requests[item.request_id]
+                item = self._make_work_item(
+                    request,
+                    item.request_slot,
+                    item.work_class,
+                    query_len,
+                )
+            
             append = KvAppend(
                 request_id=item.request_id,
                 token_start=item.token_start,
@@ -727,7 +772,10 @@ class Scheduler:
             context_len_before=token_start,
             should_sample=(
                 work_class is WorkClass.DECODE
-                or token_end == request.total_tokens
+                or (
+                    token_end == request.total_tokens
+                    and token_end < self.max_model_len
+                )
             ),
         )
 

@@ -257,13 +257,24 @@ class KvPlanTxn:
     def plan_id(self) -> int:
         return self._plan_id
 
+    def _ensure_metadata_readable(self) -> None:
+        if self._state not in (
+            KvTxnState.PREPARED,
+            KvTxnState.DISPATCHED,
+        ):
+            raise RuntimeError(
+                "KV transaction metadata is no longer readable"
+            )
+
     def staged_page_table(
         self,
         request_id: int,
     ) -> tuple[PageRef, ...]:
+        self._ensure_metadata_readable()
         return self._page_tables[request_id]
 
     def slot_mapping(self, request_id: int) -> tuple[int, ...]:
+        self._ensure_metadata_readable()
         return self._slot_mappings[request_id]
 
     def commit_before_dispatch(self) -> None:

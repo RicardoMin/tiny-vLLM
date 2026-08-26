@@ -364,3 +364,17 @@ def test_required_new_pages_is_a_pure_capacity_query() -> None:
         KvAppend(10, 3, 1)
     ) == 0
     assert manager.free_page_count == 1
+
+def test_rolled_back_kv_transaction_cannot_expose_metadata() -> None:
+    manager = KvPageManager(page_size=4, num_pages=2)
+
+    txn = manager.begin_plan(
+        plan_id=1,
+        appends=(KvAppend(1, 0, 3),),
+    )
+    assert txn is not None
+
+    txn.rollback()
+
+    with pytest.raises(RuntimeError, match="no longer readable"):
+        txn.slot_mapping(1)

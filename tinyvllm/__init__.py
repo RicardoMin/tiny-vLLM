@@ -6,6 +6,8 @@ from tinyvllm.request import (
     WorkClass,
 )
 
+from tinyvllm.config import EngineConfig
+
 __all__ = [
     "CompletionEvent",
     "EngineConfig",
