@@ -14,26 +14,55 @@ def _shard_files(
 ) -> tuple[Path, ...]:
     root = Path(model_dir).expanduser().resolve()
 
+    if not root.is_dir():
+        raise CheckpointError(
+            f"model directory does not exist: {root}"
+        )
+
     index = root / "model.safetensors.index.json"
 
     if index.is_file():
-        data = json.loads(
-            index.read_text(encoding="utf-8")
-        )
-        names = set(data["weight_map"].values())
-        files = tuple(
-            sorted(root / name for name in names)
-        )
+        try:
+            names = set(
+                json.loads(
+                    index.read_text(encoding="utf-8")
+                )["weight_map"].values()
+            )
+            files = tuple(
+                sorted((root / name).resolve() for name in names)
+            )
+
+            for path in files:
+                path.relative_to(root)
+        except (
+            OSError,
+            UnicodeError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            ValueError,
+        ) as exc:
+            raise CheckpointError(
+                f"invalid checkpoint index: {index}"
+            ) from exc
     else:
         files = tuple(
             sorted(root.glob("*.safetensors"))
         )
 
-    if not files or any(
-        not path.is_file() for path in files
-    ):
+    if not files:
         raise CheckpointError(
-            f"no usable safetensors shard in {root}"
+            f"no safetensors shard found in {root}"
+        )
+
+    missing = next(
+        (path for path in files if not path.is_file()),
+        None,
+    )
+
+    if missing is not None:
+        raise CheckpointError(
+            f"missing checkpoint shard: {missing}"
         )
 
     return files
@@ -50,37 +79,52 @@ def load_weights(
     seen: set[str] = set()
 
     for shard_path in _shard_files(model_dir):
-        with safe_open(
-            str(shard_path),
-            framework="pt",
-            device="cpu",
-        ) as shard:
-            for source_name in shard.keys():
-                if source_name in seen:
-                    raise CheckpointError(
-                        f"duplicate tensor: {source_name}"
-                    )
+        try:
+            with safe_open(
+                str(shard_path),
+                framework="pt",
+                device="cpu",
+            ) as shard:
+                for source_name in shard.keys():
+                    if source_name in seen:
+                        raise CheckpointError(
+                            f"duplicate tensor: {source_name}"
+                        )
 
-                seen.add(source_name)
+                    seen.add(source_name)
 
-                try:
-                    slot = model.load_weight(
-                        source_name,
-                        shard.get_tensor(source_name),
-                    )
-                except Exception as exc:
-                    raise CheckpointError(
-                        f"failed to load {source_name}"
-                    ) from exc
+                    try:
+                        slot = model.load_weight(
+                            source_name,
+                            shard.get_tensor(source_name),
+                        )
+                    except Exception as exc:
+                        raise CheckpointError(
+                            f"failed to load {source_name}"
+                        ) from exc
 
-                loaded.add(slot)
+                    if not isinstance(slot, str):
+                        raise CheckpointError(
+                            "load_weight() must return a string"
+                        )
+
+                    if slot not in required:
+                        raise CheckpointError(
+                            f"unexpected model weight: {slot}"
+                        )
+
+                    loaded.add(slot)
+        except CheckpointError:
+            raise
+        except Exception as exc:
+            raise CheckpointError(
+                f"failed to read checkpoint shard: {shard_path}"
+            ) from exc
 
     missing = required - loaded
 
     if missing:
-        names = ", ".join(
-            sorted(missing)[:8]
-        )
+        names = ", ".join(sorted(missing)[:8])
         raise CheckpointError(
             f"missing model weights: {names}"
         )

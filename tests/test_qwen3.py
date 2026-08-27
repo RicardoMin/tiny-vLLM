@@ -8,7 +8,10 @@ import pytest
 from tinyvllm.models import Qwen3Config
 
 
-def write_config(tmp_path: Path) -> Path:
+def write_config(
+    tmp_path: Path,
+    **updates: object,
+) -> Path:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
 
@@ -25,6 +28,7 @@ def write_config(tmp_path: Path) -> Path:
         "rope_theta": 1_000_000,
         "tie_word_embeddings": True,
     }
+    data.update(updates)
 
     (model_dir / "config.json").write_text(
         json.dumps(data),
@@ -48,16 +52,24 @@ def test_reads_qwen3_geometry(
     assert config.qkv_proj_size == 4096
 
 
-def test_rejects_unsupported_attention_features(
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"rope_scaling": {"factor": 2.0}},
+        {"hidden_act": "gelu"},
+        {"attention_bias": True},
+    ],
+)
+def test_rejects_unsupported_model_features(
     tmp_path: Path,
+    updates: dict[str, object],
 ) -> None:
-    model_dir = write_config(tmp_path)
-    data = json.loads(
-        (model_dir / "config.json").read_text()
-    )
-    data["rope_scaling"] = {"factor": 2.0}
+    with pytest.raises(ValueError):
+        Qwen3Config.from_model_dir(
+            write_config(tmp_path, **updates)
+        )
 
-    (model_dir / "config.json").write_text(
-        json.dumps(data),
-        encoding="utf-8",
-    )
+
+def test_rejects_incomplete_source_config() -> None:
+    with pytest.raises(ValueError, match="missing Qwen3"):
+        Qwen3Config.from_dict({"model_type": "qwen3"})

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -27,15 +29,30 @@ class Sink:
         return source_name
 
 
-def test_streams_safetensors(
+def test_streams_indexed_safetensors(
     tmp_path,
 ) -> None:
+    first_shard = "model-00001-of-00002.safetensors"
+    second_shard = "model-00002-of-00002.safetensors"
+
     save_file(
-        {
-            "first": torch.ones(2, 2),
-            "second": torch.full((2, 2), 2.0),
-        },
-        str(tmp_path / "model.safetensors"),
+        {"first": torch.ones(2, 2)},
+        str(tmp_path / first_shard),
+    )
+    save_file(
+        {"second": torch.full((2, 2), 2.0)},
+        str(tmp_path / second_shard),
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "first": first_shard,
+                    "second": second_shard,
+                }
+            }
+        ),
+        encoding="utf-8",
     )
 
     model = Sink()
@@ -62,5 +79,41 @@ def test_reports_missing_weight(
     with pytest.raises(
         CheckpointError,
         match="missing model weights",
+    ):
+        load_weights(Sink(), tmp_path)
+
+
+def test_rejects_unsafe_index_path(
+    tmp_path,
+) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "first": "../outside.safetensors"
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CheckpointError,
+        match="invalid checkpoint index",
+    ):
+        load_weights(Sink(), tmp_path)
+
+
+def test_rejects_malformed_index_schema(
+    tmp_path,
+) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": None}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        CheckpointError,
+        match="invalid checkpoint index",
     ):
         load_weights(Sink(), tmp_path)

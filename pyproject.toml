@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "tinyvllm"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "safetensors>=0.5,<0.6",
+    "torch>=2.6,<2.7",
+    "transformers>=4.51,<4.52",
+]
 
 [tool.setuptools.packages.find]
 include = ["tinyvllm*"]
