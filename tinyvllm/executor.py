@@ -11,6 +11,7 @@ from tinyvllm._validation import (
 from tinyvllm.batch import PreparedBatch, StepResult
 from tinyvllm.contiguous_kv import ContiguousKVCache
 from tinyvllm.models.qwen3 import Qwen3ForCausalLM
+from tinyvllm.runtime import ModelInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,34 +82,21 @@ class TorchExecutor:
                 "TorchExecutor currently supports greedy sampling"
             )
 
-        input_ids = torch.tensor(
-            batch.input_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
-
-        positions = torch.tensor(
-            batch.positions,
-            dtype=torch.long,
+        model_input = ModelInput.from_prepared_batch(
+            batch,
             device=self.device,
         )
 
         hidden_states = self.model(
-            input_ids,
-            positions,
+            model_input.input_ids,
+            model_input.positions,
             cache=self.cache,
         )
 
-        if batch.num_samples:
-            sample_indices = torch.tensor(
-                batch.sample_token_indices,
-                dtype=torch.long,
-                device=self.device,
-            )
-
+        if model_input.sample_token_indices.numel():
             logits = self.model.compute_logits(
                 hidden_states,
-                sample_indices,
+                model_input.sample_token_indices,
             )
 
             sampled_token_ids = tuple(

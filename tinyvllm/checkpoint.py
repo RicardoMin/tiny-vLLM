@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Protocol
+
+import torch
+
+
+class WeightLoadTarget(Protocol):
+    @property
+    def required_weight_names(self) -> frozenset[str]: ...
+
+    def load_weight(
+        self,
+        source_name: str,
+        tensor: torch.Tensor,
+    ) -> str: ...
 
 
 class CheckpointError(RuntimeError):
@@ -69,7 +82,7 @@ def _shard_files(
 
 
 def load_weights(
-    model: Any,
+    model: WeightLoadTarget,
     model_dir: str | Path,
 ) -> None:
     from safetensors import safe_open
