@@ -120,6 +120,8 @@ class PreparedBatch:
     kv_page_table_offsets: tuple[int, ...] = ()
     kv_slot_mapping: tuple[int, ...] = ()
 
+    request_ids: tuple[int, ...] = ()
+
 
     @property
     def num_items(self) -> int:
@@ -208,7 +210,10 @@ class BatchBuilder:
         kv_page_table_offsets = [0] if kv is not None else []
         kv_slot_mapping: list[int] = []
 
+        request_ids: list[int] = []
+
         for item, request in zip(plan.items, requests):
+            request_ids.append(request.request_id)
             if request.request_id != item.request_id:
                 raise ValueError(
                     "request order does not match plan"
@@ -293,4 +298,5 @@ class BatchBuilder:
             kv_page_table_ids=tuple(kv_page_table_ids),
             kv_page_table_offsets=tuple(kv_page_table_offsets),
             kv_slot_mapping=tuple(kv_slot_mapping),
+            request_ids=request_ids,
         )

@@ -83,7 +83,7 @@ class TorchSampler:
                 return torch.zeros(
                     (1,),
                     dtype=torch.long,
-                    device=torch.device,
+                    device=logits.device,
                 )
             return candidate_ids[:1]
 

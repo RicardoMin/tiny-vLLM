@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -71,12 +73,20 @@ class PackedLinear(nn.Module):
             )
         )
 
+        self.reset_parameters()
+
     @property
     def output_size(self) -> int:
         return sum(self.output_sizes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight)
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(
+            self.weight,
+            a=math.sqrt(5),
+        )
 
     def load_shard(
         self,
