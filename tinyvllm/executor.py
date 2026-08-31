@@ -12,6 +12,7 @@ from tinyvllm.batch import PreparedBatch, StepResult
 from tinyvllm.contiguous_kv import ContiguousKVCache
 from tinyvllm.models.qwen3 import Qwen3ForCausalLM
 from tinyvllm.runtime import ModelInput
+from tinyvllm.sampling import TorchSampler
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +40,14 @@ class TorchExecutor:
         model: Qwen3ForCausalLM,
         *,
         max_model_len: int | None = None,
+        sampler: TorchSampler | None = None,
     ) -> None:
         self.model = model.eval()
+        self.sampler = (
+            TorchSampler()
+            if sampler is None
+            else sampler
+        )
 
         parameter = next(self.model.parameters())
         self.device = parameter.device
@@ -74,14 +81,6 @@ class TorchExecutor:
                 "TorchExecutor currently supports one request"
             )
 
-        if any(
-            not params.greedy
-            for params in batch.sampling_params
-        ):
-            raise NotImplementedError(
-                "TorchExecutor currently supports greedy sampling"
-            )
-
         model_input = ModelInput.from_prepared_batch(
             batch,
             device=self.device,
@@ -99,9 +98,14 @@ class TorchExecutor:
                 model_input.sample_token_indices,
             )
 
+            sampled = self.sampler.sample(
+                logits,
+                batch.sampling_params,
+                batch.sample_request_ids,
+            )
             sampled_token_ids = tuple(
                 int(token_id)
-                for token_id in logits.argmax(dim=-1).tolist()
+                for token_id in sampled.tolist()
             )
         else:
             sampled_token_ids = ()
@@ -115,3 +119,4 @@ class TorchExecutor:
 
     def clear(self) -> None:
         self.cache.clear()
+        self.sampler.clear()

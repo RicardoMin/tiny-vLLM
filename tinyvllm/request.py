@@ -10,6 +10,8 @@ from tinyvllm._validation import (
 )
 
 
+_MAX_TORCH_SEED = (1 << 64) - 1
+
 class RequestStatus(Enum):
     PENDING = auto()
     WAITING = auto()
@@ -33,10 +35,16 @@ class SamplingParams:
     temperature: float = 0.0
     ignore_eos: bool = False
     seed: int = 0
+    top_k: int = 0
+    top_p: float = 1.0
 
     def __post_init__(self) -> None:
         _check_non_negative_int("max_new_tokens", self.max_new_tokens)
         _check_non_negative_int("seed", self.seed)
+        _check_non_negative_int("top_k", self.top_k)
+
+        if self.seed > _MAX_TORCH_SEED:
+            raise ValueError("seed must fit in 64 bits")
 
         if type(self.temperature) not in (int, float):
             raise TypeError("temperature must be a number")
@@ -44,6 +52,13 @@ class SamplingParams:
         if not math.isfinite(temperature) or temperature < 0.0:
             raise ValueError("temperature must be finite and non-negative")
         object.__setattr__(self, "temperature", temperature)
+
+        if type(self.top_p) not in (int, float):
+            raise TypeError("top_p must be a number")
+        top_p = float(self.top_p)
+        if not math.isfinite(top_p) or not 0.0 < top_p <= 1.0:
+            raise ValueError("top_p must be in (0, 1]")
+        object.__setattr__(self, "top_p", top_p)
 
         if type(self.ignore_eos) is not bool:
             raise TypeError("ignore_eos must be bool")

@@ -237,3 +237,53 @@ def test_executor_rejects_multi_request_batch() -> None:
         raise AssertionError(
             "multi-request batch must be rejected"
         )
+
+
+def test_executor_accepts_top_k_sampling() -> None:
+    model = tiny_model()
+    executor = TorchExecutor(
+        model,
+        max_model_len=32,
+    )
+
+    request = RequestState(
+        request_id=1,
+        submit_seq=0,
+        prompt_token_ids=[1, 2, 3],
+        sampling=SamplingParams(
+            max_new_tokens=1,
+            temperature=1.0,
+            top_k=1,
+            top_p=0.5,
+            seed=7,
+        ),
+        arrival_ns=0,
+    )
+
+    plan = StepPlan(
+        plan_id=0,
+        items=(
+            WorkItem(
+                request_id=1,
+                request_slot=0,
+                work_class=WorkClass.PREFILL,
+                token_start=0,
+                query_len=3,
+                context_len_before=0,
+                should_sample=True,
+            ),
+        ),
+    )
+
+    batch = BatchBuilder(
+        max_model_len=32,
+    ).prepare(
+        plan,
+        (request,),
+    )
+
+    result = executor.execute(batch)
+
+    assert result.sample_request_ids == (1,)
+    assert len(result.sampled_token_ids) == 1
+    assert 0 <= result.sampled_token_ids[0] < model.config.vocab_size

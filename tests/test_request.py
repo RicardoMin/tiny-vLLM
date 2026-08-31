@@ -20,6 +20,13 @@ def test_sampling_modes() -> None:
         ({"temperature": True}, TypeError),
         ({"ignore_eos": 1}, TypeError),
         ({"seed": -1}, ValueError),
+        ({"seed": 1 << 64}, ValueError),
+        ({"top_k": -1}, ValueError),
+        ({"top_k": True}, TypeError),
+        ({"top_p": 0.0}, ValueError),
+        ({"top_p": 1.01}, ValueError),
+        ({"top_p": float("nan")}, ValueError),
+        ({"top_p": True}, TypeError),
     ],
 )
 def test_sampling_rejects_invalid_values(kwargs, error) -> None:
