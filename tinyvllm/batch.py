@@ -298,5 +298,5 @@ class BatchBuilder:
             kv_page_table_ids=tuple(kv_page_table_ids),
             kv_page_table_offsets=tuple(kv_page_table_offsets),
             kv_slot_mapping=tuple(kv_slot_mapping),
-            request_ids=request_ids,
+            request_ids=tuple(request_ids),
         )

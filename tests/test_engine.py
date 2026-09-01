@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tinyvllm.engine import (
     Engine,
     GenerateRequest,
@@ -15,6 +17,7 @@ from tinyvllm.scheduler import Scheduler
 def make_engine(
     *,
     eos_token_id: int | None = None,
+    executor=None,
 ) -> Engine:
     scheduler = Scheduler(
         max_active_requests=4,
@@ -31,7 +34,7 @@ def make_engine(
 
     return Engine(
         scheduler,
-        CpuFakeExecutor(token_id=7),
+        CpuFakeExecutor(token_id=7) if executor is None else executor,
         clock=lambda: 0,
     )
 
@@ -130,6 +133,85 @@ def test_cancel_before_dispatch_emits_abort() -> None:
     assert events.completion_events[0].request_id == request_id
     assert events.completion_events[0].status is RequestStatus.ABORTED
     assert not engine.has_unfinished()
+
+
+def test_cancel_running_request_is_applied_on_next_step() -> None:
+    class CancelOnExecute:
+        capabilities = CpuFakeExecutor.capabilities
+
+        def __init__(self) -> None:
+            self.engine = None
+            self.fake = CpuFakeExecutor(token_id=7)
+
+        def execute(self, batch):
+            assert self.engine is not None
+            assert self.engine.cancel(1)
+            return self.fake.execute(batch)
+
+        def release(self, request_id: int) -> None:
+            self.fake.release(request_id)
+
+        def clear(self) -> None:
+            self.fake.clear()
+
+    executor = CancelOnExecute()
+    engine = make_engine(executor=executor)
+    executor.engine = engine
+
+    request_id = engine.submit(
+        (1, 2, 3),
+        SamplingParams(max_new_tokens=4),
+        arrival_ns=0,
+        request_id=1,
+    )
+
+    first = engine.step(now_ns=0)
+    assert first.token_events == ()
+    assert first.completion_events == ()
+
+    second = engine.step(now_ns=1)
+    assert second.token_events == ()
+    assert second.completion_events[0].request_id == request_id
+    assert second.completion_events[0].status is RequestStatus.ABORTED
+    assert not engine.has_unfinished()
+
+
+def test_executor_failure_tears_down_dispatched_state() -> None:
+    class FailingExecutor:
+        capabilities = CpuFakeExecutor.capabilities
+
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def execute(self, batch):
+            raise ValueError("injected executor failure")
+
+        def release(self, request_id: int) -> None:
+            return None
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    executor = FailingExecutor()
+    engine = make_engine(executor=executor)
+    engine.submit(
+        (1, 2, 3),
+        SamplingParams(max_new_tokens=1),
+        arrival_ns=0,
+        request_id=1,
+    )
+
+    with pytest.raises(RuntimeError, match="executor failed"):
+        engine.step(now_ns=0)
+
+    assert executor.clear_calls == 1
+    assert not engine.scheduler.has_open_transaction
+    assert engine.scheduler.kv_manager.free_page_count == (
+        engine.scheduler.kv_manager.allocator.num_pages
+    )
+
+    with pytest.raises(RuntimeError, match="engine is failed"):
+        engine.step(now_ns=1)
 
 
 def test_zero_output_finishes_without_executor_work() -> None:

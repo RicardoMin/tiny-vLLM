@@ -11,6 +11,7 @@ from tinyvllm.batch import (
     PreparedBatch,
     StepResult,
 )
+from tinyvllm.executor import ExecutorCapabilities
 from tinyvllm.request import (
     CompletionEvent,
     RequestStatus,
@@ -20,11 +21,18 @@ from tinyvllm.scheduler import (
     AddCommand,
     CancelCommand,
     EngineCommand,
+    ScheduleDecision,
     Scheduler,
+    SchedulerResourceError,
 )
 
 
 class EngineExecutor(Protocol):
+    @property
+    def capabilities(self) -> ExecutorCapabilities:
+        ...
+
+
     def execute(
         self,
         batch: PreparedBatch,
@@ -221,7 +229,7 @@ class Engine:
             except KeyError:
                 return False
 
-            if request_id.terminal:
+            if request.terminal:
                 return False
 
         self._commands.append(
@@ -272,6 +280,10 @@ class Engine:
         txn = self.scheduler.begin_step(start_ns)
 
         if txn is None:
+            if self.scheduler.last_decision is ScheduleDecision.BLOCKED:
+                raise SchedulerResourceError(
+                    self.scheduler.blocked_reason
+                )
             return self._collect_events(None)
 
         try:
@@ -290,6 +302,12 @@ class Engine:
             self.scheduler.rollback(txn)
             raise
 
+        try:
+            self.executor.capabilities.validate(batch)
+        except BaseException:
+            self.scheduler.rollback(txn)
+            raise
+
         dispatch_ns = start_ns
 
         if not explicit_time:
@@ -304,14 +322,13 @@ class Engine:
                 dispatch_ns,
             )
         except BaseException as exc:
-            self._failed = exc
+            self._fail_stop(exc)
             raise
 
         try:
             result = self.executor.execute(batch)
         except BaseException as exc:
-            self.scheduler.fail_step(txn)
-            self._failed = exc
+            self._fail_stop(exc, txn)
             raise RuntimeError(
                 "executor failed; engine is failed"
             ) from exc
@@ -328,13 +345,13 @@ class Engine:
                 done_ns,
             )
         except BaseException as exc:
-            self._failed = exc
+            self._fail_stop(exc, txn)
             raise
 
         try:
             return self._collect_events(result)
         except BaseException as exc:
-            self._failed = exc
+            self._fail_stop(exc)
             raise
 
 
@@ -365,14 +382,14 @@ class Engine:
         )
 
         outputs: dict[int, RequestOutput] = {}
+        target_ids = set(request_ids)
 
         while len(outputs) < len(request_ids):
             events = self.step()
 
             for event in events.completion_events:
-                outputs[event.request_id] = (
-                    RequestOutput.from_event(event)
-                )
+                if event.request_id in target_ids:
+                    outputs[event.request_id] = RequestOutput.from_event(event)
 
             if (
                 not self.has_unfinished()
@@ -438,3 +455,19 @@ class Engine:
             raise RuntimeError(
                 "engine is failed"
             ) from self._failed
+
+
+    def _fail_stop(
+        self,
+        cause: BaseException,
+        txn=None,
+    ) -> None:
+        if txn is not None and self.scheduler.has_open_transaction:
+            self.scheduler.fail_step(txn)
+
+        try:
+            self.executor.clear()
+        except BaseException:
+            pass
+
+        self._failed = cause

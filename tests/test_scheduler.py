@@ -11,7 +11,13 @@ from tinyvllm.request import (
     SamplingParams,
     WorkClass
 )
-from tinyvllm.scheduler import AddCommand, Scheduler, TxnState
+from tinyvllm.scheduler import (
+    AddCommand,
+    BlockedReason,
+    ScheduleDecision,
+    Scheduler,
+    TxnState,
+)
 from tinyvllm.batch import (
     BatchBuilder,
     StepResult,
@@ -480,8 +486,6 @@ def test_bad_result_fails_before_publish(
         now_ns=0,
     )
     txn, result = _run_fake_step(scheduler)
-    before = committed_state(scheduler)
-
     if bad_result == "plan":
         result = StepResult(
             result.plan_id + 1,
@@ -504,11 +508,13 @@ def test_bad_result_fails_before_publish(
     with pytest.raises((RuntimeError, ValueError)):
         scheduler.commit_step(txn, result, now_ns=2)
 
-    assert committed_state(scheduler) == before
+    assert scheduler.get_request(10).inflight_plan_id is None
+    assert scheduler.get_request(11).inflight_plan_id is None
+    assert scheduler.waiting_request_ids == ()
     assert txn.state is TxnState.FAILED
-    assert txn.kv.state is KvTxnState.DISPATCHED
+    assert txn.kv.state is KvTxnState.FAILED
     assert scheduler.kv_manager.valid_token_count(10) == 0
-    assert scheduler.has_open_transaction
+    assert not scheduler.has_open_transaction
 
 
 def test_executor_failure_is_fail_stop() -> None:
@@ -523,16 +529,18 @@ def test_executor_failure_is_fail_stop() -> None:
 
     request = scheduler.get_request(10)
     assert txn.state is TxnState.FAILED
-    assert txn.kv.state is KvTxnState.DISPATCHED
-    assert request.inflight_plan_id == txn.plan.plan_id
+    assert txn.kv.state is KvTxnState.FAILED
+    assert request.inflight_plan_id is None
+    assert scheduler.kv_manager.page_table(10) == ()
+    assert not scheduler.has_open_transaction
 
-    with pytest.raises(RuntimeError, match="open transaction"):
+    with pytest.raises(RuntimeError, match="scheduler is failed"):
         scheduler.apply_commands((), now_ns=2)
 
-    with pytest.raises(RuntimeError, match="already open"):
+    with pytest.raises(RuntimeError, match="scheduler is failed"):
         scheduler.begin_step(now_ns=2)
 
-    with pytest.raises(RuntimeError, match="must be prepared"):
+    with pytest.raises(ValueError, match="not the scheduler's open"):
         scheduler.rollback(txn)
 
 
@@ -859,34 +867,48 @@ def test_begin_step_reserves_kv_without_publishing_table() -> None:
 
 def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
     scheduler = make_scheduler(
-        active=2,
-        rows=2,
+        active=1,
+        rows=1,
         tokens=10,
         chunk=8,
         model_len=8,
         kv_page_size=4,
         kv_num_pages=1,
     )
+
     scheduler.apply_commands(
-        (
-            command(0, 10, prompt_len=5),
-            command(1, 11, prompt_len=5),
-        ),
+        (command(0, 10, prompt_len=4, max_new_tokens=2),),
         now_ns=0,
     )
+    txn = scheduler.begin_step(now_ns=0)
+    assert txn is not None
+    batch = BatchBuilder(max_model_len=8).prepare(
+        txn.plan,
+        (scheduler.get_request(10),),
+        kv=txn.kv,
+    )
+    scheduler.mark_dispatched(txn, now_ns=0)
+    scheduler.commit_step(
+        txn,
+        CpuFakeExecutor(token_id=99).execute(batch),
+        now_ns=1,
+    )
 
+    scheduler.apply_commands((), now_ns=1)
     before = committed_state(scheduler)
     before_allocator = scheduler.kv_manager.allocator.snapshot()
 
-    # assert scheduler.begin_step(now_ns=0) is None
+    assert scheduler.begin_step(now_ns=1) is None
+    assert scheduler.last_decision is ScheduleDecision.BLOCKED
+    assert scheduler.blocked_reason is BlockedReason.KV_CAPACITY
 
     assert committed_state(scheduler) == before
     assert (
         scheduler.kv_manager.allocator.snapshot()
         == before_allocator
     )
-    assert scheduler.kv_manager.page_table(10) == ()
-    assert scheduler.kv_manager.page_table(11) == ()
+    assert scheduler.kv_manager.page_table(10)
+    assert scheduler.kv_manager.valid_token_count(10) == 4
     assert not scheduler.has_open_transaction
 
 

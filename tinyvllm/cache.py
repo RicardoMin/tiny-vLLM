@@ -211,6 +211,7 @@ class KvTxnState(Enum):
     DISPATCHED = auto()
     COMMITTED = auto()
     ROLLED_BACK = auto()
+    FAILED = auto()
 
 
 class KvPlanTxn:
@@ -285,6 +286,9 @@ class KvPlanTxn:
 
     def rollback(self) -> None:
         self._manager._rollback(self)
+
+    def fail(self) -> None:
+        self._manager._fail(self)
 
 
 class KvPageManager:
@@ -439,7 +443,7 @@ class KvPageManager:
             token_ends[request_id] = token_end
 
             first_page = token_start // self.page_size
-            last_page = token_end // self.page_size
+            last_page = (token_end - 1) // self.page_size
 
             written_refs.extend(
                 staged_table[first_page : last_page + 1]
@@ -480,6 +484,36 @@ class KvPageManager:
             self.allocator.release(ref)
 
 
+    def teardown(self, txn: KvPlanTxn | None = None) -> None:
+        """Release all KV ownership after an unrecoverable execution error."""
+        if txn is not None and self._open_txn not in (None, txn):
+            raise ValueError("a different KV transaction is open")
+
+        if self._open_txn is not None:
+            open_txn = self._open_txn
+            if open_txn._state is KvTxnState.PREPARED:
+                if open_txn._reservation is not None:
+                    self.allocator.rollback(open_txn._reservation)
+            elif open_txn._state is KvTxnState.DISPATCHED:
+                open_txn._state = KvTxnState.FAILED
+            self._open_txn = None
+
+        seen: set[tuple[int, int]] = set()
+        for table in tuple(self._page_tables.values()):
+            for ref in table:
+                key = (ref.page_id, ref.generation)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if self.allocator.page_state(ref) is PageState.PRIVATE_MUTABLE:
+                    self.allocator.release(ref)
+
+        self._page_tables.clear()
+        self._valid_token_counts.clear()
+        if txn is not None:
+            txn._state = KvTxnState.FAILED
+
+
     def _commit_before_dispatch(self, txn: KvPlanTxn) -> None:
         self._require_open(txn, KvTxnState.PREPARED)
 
@@ -511,6 +545,12 @@ class KvPageManager:
 
         txn._state = KvTxnState.ROLLED_BACK
         self._open_txn = None
+
+
+    def _fail(self, txn: KvPlanTxn) -> None:
+        if txn.state not in (KvTxnState.DISPATCHED, KvTxnState.COMMITTED):
+            raise ValueError("KV transaction must be dispatched or committed")
+        self.teardown(txn)
 
 
     def _require_open(

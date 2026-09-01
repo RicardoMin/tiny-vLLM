@@ -54,6 +54,9 @@ class ContiguousKVCache:
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> None:
+        if not 0 <= layer_idx < self.key.shape[0]:
+            raise ValueError("layer_idx is out of range")
+
         if start != self._length:
             raise ValueError(
                 "KV write must begin at current cache length"
@@ -80,6 +83,9 @@ class ContiguousKVCache:
         layer_idx: int,
         end: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not 0 <= layer_idx < self.key.shape[0]:
+            raise ValueError("layer_idx is out of range")
+
         if not 0 <= end <= self.max_seq_len:
             raise ValueError("invalid KV read range")
 

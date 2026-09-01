@@ -295,6 +295,13 @@ def test_completed_write_returns_only_pages_touched_this_step() -> None:
     ) == (1, 2)
 
 
+def test_completed_write_stops_at_exact_page_boundary() -> None:
+    manager = KvPageManager(page_size=4, num_pages=2)
+    _, written_refs = _commit(manager, 1, KvAppend(10, 0, 4))
+
+    assert tuple(ref.page_id for ref in written_refs) == (0,)
+
+
 def test_release_request_returns_all_pages() -> None:
     manager = KvPageManager(page_size=4, num_pages=3)
     _commit(manager, 1, KvAppend(10, 0, 5))

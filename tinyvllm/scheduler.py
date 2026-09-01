@@ -70,6 +70,29 @@ class TxnState(Enum):
     FAILED = auto()
 
 
+class ScheduleDecision(Enum):
+    """Why the scheduler did or did not produce a step plan."""
+
+    PLAN = auto()
+    IDLE = auto()
+    BLOCKED = auto()
+
+
+class BlockedReason(Enum):
+    """Resource condition that prevents the next plan from progressing."""
+
+    KV_CAPACITY = auto()
+
+
+class SchedulerResourceError(RuntimeError):
+    """The scheduler cannot make progress with its configured resources."""
+
+    def __init__(self, reason: BlockedReason | None) -> None:
+        self.reason = reason
+        detail = "unknown reason" if reason is None else reason.name.lower()
+        super().__init__(f"scheduler is blocked: {detail}")
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduleTxn:
     plan: StepPlan
@@ -163,11 +186,24 @@ class Scheduler:
         self._command_cutoff_ready = False
         self._next_plan_id = 0
         self._open_txn: ScheduleTxn | None = None
+        self._last_decision = ScheduleDecision.IDLE
+        self._blocked_reason: BlockedReason | None = None
+        self._failed = False
 
 
     @property
     def has_open_transaction(self) -> bool:
         return self._open_txn is not None
+
+
+    @property
+    def last_decision(self) -> ScheduleDecision:
+        return self._last_decision
+
+
+    @property
+    def blocked_reason(self) -> BlockedReason | None:
+        return self._blocked_reason
 
 
     @property
@@ -233,6 +269,7 @@ class Scheduler:
         commands: tuple[EngineCommand, ...],
         now_ns: int,
     ) -> None:
+        self._ensure_healthy()
         if self._open_txn is not None:
             raise RuntimeError(
                 "cannot apply commands during an open transaction"
@@ -321,6 +358,7 @@ class Scheduler:
 
 
     def begin_step(self, now_ns: int) -> ScheduleTxn | None:
+        self._ensure_healthy()
         if self._open_txn is not None:
             raise RuntimeError(
                 "a scheduling transaction is already open"
@@ -333,6 +371,9 @@ class Scheduler:
             raise ValueError(
                 "apply_commands must run first with the same now_ns"
             )
+
+        self._last_decision = ScheduleDecision.IDLE
+        self._blocked_reason = None
 
         decode_candidates = [
             (
@@ -461,6 +502,7 @@ class Scheduler:
         items = decode_items + prefill_items
 
         if not items:
+            self._last_decision = ScheduleDecision.IDLE
             return None
 
         plan = StepPlan(
@@ -484,6 +526,8 @@ class Scheduler:
         if kv_fallback:
             items = self._fit_kv_capacity(items)
             if not items:
+                self._last_decision = ScheduleDecision.BLOCKED
+                self._blocked_reason = BlockedReason.KV_CAPACITY
                 return None
 
             plan = StepPlan(
@@ -516,6 +560,7 @@ class Scheduler:
         )
         self._next_plan_id += 1
         self._open_txn = txn
+        self._last_decision = ScheduleDecision.PLAN
         return txn
 
 
@@ -677,7 +722,23 @@ class Scheduler:
 
     def fail_step(self, txn: ScheduleTxn) -> None:
         self._require_open_txn(txn, TxnState.DISPATCHED)
+        txn.kv.fail()
         object.__setattr__(txn, "state", TxnState.FAILED)
+        for item in txn.plan.items:
+            request = self._requests.get(item.request_id)
+            if request is not None:
+                request.inflight_plan_id = None
+        self._waiting_ids.clear()
+        self._prefill_ids.clear()
+        self._decode_ids.clear()
+        self._slot_request_ids[:] = [None] * self.max_active_requests
+        self._open_txn = None
+        self._failed = True
+
+
+    def _ensure_healthy(self) -> None:
+        if self._failed:
+            raise RuntimeError("scheduler is failed")
 
 
     def _require_open_txn(

@@ -14,10 +14,7 @@ from tinyvllm.batch import (
     StepPlan,
     WorkItem,
 )
-from tinyvllm.executor import (
-    BatchedEagerExecutor,
-    TorchExecutor,
-)
+from tinyvllm.executor import EagerExecutor
 from tinyvllm.models.qwen3 import (
     Qwen3Config,
     Qwen3ForCausalLM,
@@ -156,7 +153,7 @@ def test_batched_prefill_uses_independent_caches() -> None:
     first = make_request(11, (1, 2, 3))
     second = make_request(22, (4, 5))
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -187,7 +184,7 @@ def test_batched_prefill_matches_independent_torch_executors() -> None:
         make_request(22, (4, 5)),
     )
 
-    batched = BatchedEagerExecutor(
+    batched = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -214,7 +211,7 @@ def test_batched_prefill_matches_independent_torch_executors() -> None:
     expected_tokens: dict[int, int] = {}
 
     for request in requests:
-        single = TorchExecutor(
+        single = EagerExecutor(
             deepcopy(batched.model),
             max_model_len=MAX_MODEL_LEN,
         )
@@ -246,7 +243,7 @@ def test_partial_prefill_does_not_sample() -> None:
         (1, 2, 3, 4),
     )
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -278,7 +275,7 @@ def test_decode_grows_each_request_cache_without_cross_contamination() -> None:
         make_request(22, (4, 5)),
     ]
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -346,7 +343,7 @@ def test_decode_grows_each_request_cache_without_cross_contamination() -> None:
             tuple(request.prompt_token_ids),
         )
 
-        oracle = TorchExecutor(
+        oracle = EagerExecutor(
             tiny_model(),
             max_model_len=MAX_MODEL_LEN,
         )
@@ -412,7 +409,7 @@ def test_mixed_plan_skips_logits_for_partial_prefill() -> None:
         (8, 9, 10, 11),
     )
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -489,12 +486,12 @@ def test_reordering_batch_preserves_request_sample_mapping() -> None:
         make_request(11, (1, 2, 3), sampling=params),
     )
 
-    forward = BatchedEagerExecutor(
+    forward = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
 
-    reverse = BatchedEagerExecutor(
+    reverse = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -588,7 +585,7 @@ def test_executor_requires_unique_request_id_per_item(
     )
 
     with pytest.raises(ValueError):
-        BatchedEagerExecutor(
+        EagerExecutor(
             tiny_model(),
             max_model_len=MAX_MODEL_LEN,
         ).execute(batch)
@@ -600,7 +597,7 @@ def test_release_discards_request_cache() -> None:
         (1, 2, 3),
     )
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
@@ -654,7 +651,7 @@ def test_clear_discards_caches_and_sampler_rng() -> None:
         ),
     )
 
-    executor = BatchedEagerExecutor(
+    executor = EagerExecutor(
         tiny_model(),
         max_model_len=MAX_MODEL_LEN,
     )
