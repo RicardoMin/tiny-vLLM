@@ -50,6 +50,18 @@ class AddCommand:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CancelCommand:
+    seq: int
+    request_id: int
+
+    def __post_init__(self) -> None:
+        _check_non_negative_int("seq", self.seq)
+        _check_non_negative_int("request_id", self.request_id)
+
+
+EngineCommand = AddCommand | CancelCommand
+
 class TxnState(Enum):
     PREPARED = auto()
     DISPATCHED = auto()
@@ -80,6 +92,7 @@ class Scheduler:
         prefill_reserve_requests: int = 1,
         kv_page_size: int = 16,
         kv_num_pages: int | None = None,
+        eos_token_id: int | None = None,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
         _check_positive_int("max_step_requests", max_step_requests)
@@ -117,6 +130,9 @@ class Scheduler:
         else:
             _check_positive_int("kv_num_pages", kv_num_pages)
 
+        if eos_token_id is not None:
+            _check_non_negative_int("eos_token_id", eos_token_id)
+
         self.max_active_requests = max_active_requests
         self.max_step_requests = max_step_requests
         self.max_scheduled_tokens = max_scheduled_tokens
@@ -129,6 +145,7 @@ class Scheduler:
             page_size=kv_page_size,
             num_pages=kv_num_pages,
         )
+        self.eos_token_id = eos_token_id
 
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
@@ -213,7 +230,7 @@ class Scheduler:
 
     def apply_commands(
         self,
-        commands: tuple[AddCommand, ...],
+        commands: tuple[EngineCommand, ...],
         now_ns: int,
     ) -> None:
         if self._open_txn is not None:
@@ -228,11 +245,12 @@ class Scheduler:
 
         staged: list[RequestState] = []
         staged_request_ids: set[int] = set()
+        cancellations: list[CancelCommand] = []
 
         for command in commands:
-            if not isinstance(command, AddCommand):
+            if not isinstance(command, (AddCommand, CancelCommand)):
                 raise TypeError(
-                    "commands must contain AddCommand values"
+                    "commands must contain AddCommand or CancelCommand"
                 )
 
             if command.seq != expected_seq:
@@ -241,27 +259,39 @@ class Scheduler:
                     f"got {command.seq}"
                 )
 
-            if (
-                command.request_id in self._requests
-                or command.request_id in staged_request_ids
-            ):
-                raise ValueError(
-                    f"duplicate request_id: {command.request_id}"
+            if isinstance(command, AddCommand):
+                if (
+                    command.request_id in self._requests
+                    or command.request_id in staged_request_ids
+                ):
+                    raise ValueError(
+                        f"duplicate request_id: {command.request_id}"
+                    )
+
+                if len(command.prompt_token_ids) > self.max_model_len:
+                    raise ValueError("prompt exceeds max_model_len")
+
+                staged.append(
+                    RequestState(
+                        request_id=command.request_id,
+                        submit_seq=command.seq,
+                        prompt_token_ids=command.prompt_token_ids,
+                        sampling=command.sampling,
+                        arrival_ns=command.arrival_ns,
+                    )
                 )
+                staged_request_ids.add(command.request_id)
+            else:
+                if (
+                    command.request_id not in self._requests
+                    and command.request_id not in staged_request_ids
+                ):
+                    raise KeyError(
+                        f"unknow request_id: {command.request_id}"
+                    )
 
-            if len(command.prompt_token_ids) > self.max_model_len:
-                raise ValueError("prompt exceeds max_model_len")
+                cancellations.append(command)
 
-            request = RequestState(
-                request_id=command.request_id,
-                submit_seq=command.seq,
-                prompt_token_ids=command.prompt_token_ids,
-                sampling=command.sampling,
-                arrival_ns=command.arrival_ns,
-            )
-
-            staged.append(request)
-            staged_request_ids.add(command.request_id)
             expected_seq += 1
 
         # Publish only after the complete command batch validates.
@@ -276,8 +306,14 @@ class Scheduler:
                 ),
             )
 
-        if staged:
-            self._last_command_seq = staged[-1].submit_seq
+        for command in cancellations:
+            self._abort_request(
+                self._requests[command.request_id],
+                now_ns,
+            )
+
+        if commands:
+            self._last_command_seq = commands[-1].seq
 
         self._now_ns = now_ns
         self._promote_arrivals(now_ns)
@@ -596,9 +632,8 @@ class Scheduler:
                         self._prefill_ids.append(request.request_id)
                     continue
 
-                request.output_token_ids.append(
-                    result.sampled_token_ids[sample_index]
-                )
+                token_id = result.sampled_token_ids[sample_index]
+                request.output_token_ids.append(token_id)
                 sample_index += 1
 
                 if request.first_token_ns is None:
@@ -606,8 +641,15 @@ class Scheduler:
 
                 request.work_class = WorkClass.DECODE
 
+                stop_on_eos = (
+                    self.eos_token_id is not None
+                    and token_id == self.eos_token_id
+                    and not request.sampling.ignore_eos
+                )
+
                 if (
-                    request.remaining_new_tokens == 0
+                    stop_on_eos
+                    or request.remaining_new_tokens == 0
                     or request.computed_tokens >= self.max_model_len
                 ):
                     self._finish_request(
@@ -834,16 +876,49 @@ class Scheduler:
         )
 
 
-    def _finish_request(
+    def _abort_request(
         self,
         request: RequestState,
         now_ns: int,
     ) -> None:
-        request.status = RequestStatus.FINISHED
-        request.finished_ns = now_ns
-        request.inflight_plan_id = None
+        if request.terminal:
+            return
 
-        event = CompletionEvent.from_request(request)
+        if request.inflight_plan_id is not None:
+            request.cancel_requested = True
+            return
+
+        for queue in (
+            self._waiting_ids,
+            self._prefill_ids,
+            self._decode_ids,
+        ):
+            try:
+                queue.remove(request.request_id)
+            except ValueError:
+                pass
+
+        if request.active_slot is not None:
+            self._slot_request_ids[request.active_slot] = None
+            request.active_slot = None
+
+        self._terminalize_request(
+            request,
+            RequestStatus.ABORTED,
+            now_ns,
+        )
+
+
+    def _terminalize_request(
+        self,
+        request: RequestState,
+        status: RequestStatus,
+        now_ns: int,
+    ) -> None:
+        request.status = status
+        request.cancel_requested = False
+        request.inflight_plan_id = None
+        request.finished_ns = now_ns
 
         if request.active_slot is not None:
             self._slot_request_ids[request.active_slot] = None
@@ -853,7 +928,21 @@ class Scheduler:
             request.request_id
         )
 
-        self._completion_events.append(event)
+        self._completion_events.append(
+            CompletionEvent.from_request(request)
+        )
+
+
+    def _finish_request(
+        self,
+        request: RequestState,
+        now_ns: int,
+    ) -> None:
+        self._terminalize_request(
+            request,
+            RequestStatus.FINISHED,
+            now_ns,
+        )
 
     def _promote_arrivals(self, now_ns: int) -> None:
         while (
@@ -861,7 +950,10 @@ class Scheduler:
             and self._pending_arrivals[0][0] <= now_ns
         ):
             _, _, request_id = heappop(self._pending_arrivals)
-            request = self._requests[request_id]
+            request = self._requests.get(request_id)
+
+            if request is None:
+                continue
 
             if request.status is not RequestStatus.PENDING:
                 continue

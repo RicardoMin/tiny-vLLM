@@ -31,6 +31,12 @@ class CpuFakeExecutor:
             sampled_token_ids=(self.token_id,) * batch.num_samples,
         )
 
+    def release(self, request_id: int) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
 
 class TorchExecutor:
     """Correctness-first executor for one request and contiguous KV."""
@@ -115,6 +121,11 @@ class TorchExecutor:
             sample_request_ids=batch.sample_request_ids,
             sampled_token_ids=sampled_token_ids,
         )
+
+
+    def release(self, request_id: int) -> None:
+        self.cache.clear()
+        self.sampler.release(request_id)
 
 
     def clear(self) -> None:
@@ -261,7 +272,7 @@ class BatchedEagerExecutor:
 
 
     def release(self, request_id: int) -> None:
-        self._caches.pop(request_id)
+        self._caches.pop(request_id, None)
         self.sampler.release(request_id)
 
 

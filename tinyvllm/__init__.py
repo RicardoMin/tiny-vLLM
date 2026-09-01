@@ -6,6 +6,14 @@ from tinyvllm.request import (
     WorkClass,
 )
 
+from tinyvllm.engine import (
+    Engine,
+    EngineStepEvents,
+    GenerateRequest,
+    RequestOutput,
+    TokenEvent,
+)
+
 from tinyvllm.config import EngineConfig
 
 __all__ = [
@@ -15,4 +23,9 @@ __all__ = [
     "RequestStatus",
     "SamplingParams",
     "WorkClass",
+    "Engine",
+    "EngineStepEvents",
+    "GenerateRequest",
+    "RequestOutput",
+    "TokenEvent",
 ]
