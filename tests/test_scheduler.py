@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import FrozenInstanceError
+from collections.abc import Iterable
 
 import pytest
 
@@ -57,6 +58,7 @@ def make_scheduler(
     reserve_rows: int = 1,
     kv_page_size: int = 16,
     kv_num_pages: int | None = None,
+    eos_token_ids: Iterable[int] | None = None,
 ) -> Scheduler:
     return Scheduler(
         max_active_requests=active,
@@ -68,6 +70,7 @@ def make_scheduler(
         prefill_reserve_requests=reserve_rows,
         kv_page_size=kv_page_size,
         kv_num_pages=kv_num_pages,
+        eos_token_ids=eos_token_ids,
     )
 
 

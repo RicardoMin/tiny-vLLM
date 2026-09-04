@@ -1,5 +1,5 @@
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from heapq import heappop, heappush
@@ -17,6 +17,7 @@ from tinyvllm._validation import (
     _check_non_negative_int,
     _check_positive_int,
     _check_token_id,
+    _normalize_token_ids,
 )
 
 from tinyvllm.cache import (
@@ -115,7 +116,7 @@ class Scheduler:
         prefill_reserve_requests: int = 1,
         kv_page_size: int = 16,
         kv_num_pages: int | None = None,
-        eos_token_id: int | None = None,
+        eos_token_ids: Iterable[int] | None = None,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
         _check_positive_int("max_step_requests", max_step_requests)
@@ -153,8 +154,6 @@ class Scheduler:
         else:
             _check_positive_int("kv_num_pages", kv_num_pages)
 
-        if eos_token_id is not None:
-            _check_non_negative_int("eos_token_id", eos_token_id)
 
         self.max_active_requests = max_active_requests
         self.max_step_requests = max_step_requests
@@ -168,7 +167,8 @@ class Scheduler:
             page_size=kv_page_size,
             num_pages=kv_num_pages,
         )
-        self.eos_token_id = eos_token_id
+
+        self._eos_token_ids = _normalize_token_ids("eos_token_ids", eos_token_ids) if eos_token_ids is not None else set()
 
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
@@ -189,6 +189,11 @@ class Scheduler:
         self._last_decision = ScheduleDecision.IDLE
         self._blocked_reason: BlockedReason | None = None
         self._failed = False
+
+
+    @property
+    def eos_token_ids(self) -> frozenset[int]:
+        return self._eos_token_ids
 
 
     @property
@@ -687,8 +692,7 @@ class Scheduler:
                 request.work_class = WorkClass.DECODE
 
                 stop_on_eos = (
-                    self.eos_token_id is not None
-                    and token_id == self.eos_token_id
+                    token_id in self._eos_token_ids
                     and not request.sampling.ignore_eos
                 )
 

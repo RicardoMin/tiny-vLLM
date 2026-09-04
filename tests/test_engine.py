@@ -16,7 +16,7 @@ from tinyvllm.scheduler import Scheduler
 
 def make_engine(
     *,
-    eos_token_id: int | None = None,
+    eos_token_ids: tuple[int, ...] | None = None,
     executor=None,
 ) -> Engine:
     scheduler = Scheduler(
@@ -29,7 +29,7 @@ def make_engine(
         prefill_reserve_requests=1,
         kv_page_size=4,
         kv_num_pages=16,
-        eos_token_id=eos_token_id,
+        eos_token_ids=eos_token_ids,
     )
 
     return Engine(
@@ -76,7 +76,7 @@ def test_generate_returns_submission_order() -> None:
 
 
 def test_eos_finishes_request() -> None:
-    engine = make_engine(eos_token_id=7)
+    engine = make_engine(eos_token_ids=7)
 
     request_id = engine.submit(
         (1, 2),
@@ -94,7 +94,7 @@ def test_eos_finishes_request() -> None:
 
 
 def test_ignore_eos_continues_until_length() -> None:
-    engine = make_engine(eos_token_id=7)
+    engine = make_engine(eos_token_ids=7)
 
     request_id = engine.submit(
         (1,),
@@ -232,3 +232,68 @@ def test_zero_output_finishes_without_executor_work() -> None:
 
     assert output.status is RequestStatus.FINISHED
     assert output.output_token_ids == ()
+
+
+def test_secondary_eos_finishes_request() -> None:
+    engine = make_engine(
+        eos_token_ids=(7, 8),
+        executor=CpuFakeExecutor(token_id=8),
+    )
+
+    request_id = engine.submit(
+        (1,),
+        SamplingParams(max_new_tokens=8),
+        arrival_ns=0,
+        request_id=1,
+    )
+
+    events = engine.step(now_ns=0)
+
+    assert events.token_events[0].request_id == request_id
+    assert events.token_events[0].token_id == 8
+    assert events.completion_events[0].status is RequestStatus.FINISHED
+
+
+def test_non_eos_token_continues_with_multiple_eos_ids() -> None:
+    engine = make_engine(
+        eos_token_ids=(7, 8),
+        executor=CpuFakeExecutor(token_id=9),
+    )
+
+    request_id = engine.submit(
+        (1,),
+        SamplingParams(max_new_tokens=2),
+        arrival_ns=0,
+        request_id=1,
+    )
+
+    first = engine.step(now_ns=0)
+    second = engine.step(now_ns=1)
+
+    assert first.completion_events == ()
+    assert second.completion_events[0].request_id == request_id
+    assert second.completion_events[0].output_token_ids == (9, 9)
+
+
+def test_ignore_eos_applies_to_all_eos_ids() -> None:
+    engine = make_engine(
+        eos_token_ids=(7, 8),
+        executor=CpuFakeExecutor(token_id=8),
+    )
+
+    request_id = engine.submit(
+        (1,),
+        SamplingParams(
+            max_new_tokens=2,
+            ignore_eos=True,
+        ),
+        arrival_ns=0,
+        request_id=1,
+    )
+
+    first = engine.step(now_ns=0)
+    second = engine.step(now_ns=1)
+
+    assert first.completion_events == ()
+    assert second.completion_events[0].request_id == request_id
+    assert second.completion_events[0].output_token_ids == (8, 8)
