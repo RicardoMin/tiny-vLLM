@@ -263,3 +263,47 @@ def test_rejects_short_table_and_bad_rows() -> None:
                 dtype=torch.int32,
             ),
         )
+
+def test_rejects_reversed_logical_range() -> None:
+    store = make_store()
+
+    with pytest.raises(ValueError, match="end must not"):
+        store.logical_slots(
+            (),
+            start=2,
+            end=1,
+        )
+
+
+@pytest.mark.parametrize("slot", (-1, 8))
+def test_rejects_out_of_range_slots(slot: int) -> None:
+    store = make_store()
+
+    with pytest.raises(ValueError, match="out of range"):
+        store.read(
+            0,
+            torch.tensor([slot], dtype=torch.long),
+        )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required",
+)
+def test_unindexed_cuda_device_uses_current_device() -> None:
+    store = PagedKVCache(
+        num_layers=1,
+        num_pages=1,
+        page_size=1,
+        num_kv_heads=1,
+        head_dim=2,
+        device="cuda",
+        dtype=torch.float32,
+    )
+
+    expected = torch.device(
+        "cuda",
+        torch.cuda.current_device(),
+    )
+    assert store.device == expected
+    assert store.key.device == expected

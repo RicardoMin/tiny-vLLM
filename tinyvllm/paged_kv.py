@@ -41,7 +41,7 @@ class PagedKVCache:
 
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device(
-                "cude",
+                "cuda",
                 torch.cuda.current_device(),
             )
 
@@ -80,7 +80,7 @@ class PagedKVCache:
         _check_non_negative_int("end", end)
 
         if end < start:
-            return ValueError("end must not be less than start")
+            raise ValueError("end must not be less than start")
 
         if end == start:
             return torch.empty(
@@ -222,3 +222,11 @@ class PagedKVCache:
             raise ValueError(
                 "slots must use the cache device"
             )
+
+        if slots.numel():
+            if bool(torch.any(slots < 0)) or bool(
+                torch.any(slots >= self.num_slots)
+            ):
+                raise ValueError(
+                    "slots are out of range"
+                )
