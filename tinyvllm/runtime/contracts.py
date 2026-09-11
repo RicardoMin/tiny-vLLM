@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 
 from tinyvllm.batch import PreparedBatch
 
+
+class AttentionBackend(Protocol):
+    """Per-step attention over flat, normalized and rotated Q/K/V."""
+
+    def __call__(
+        self,
+        layer_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        scale: float,
+    ) -> torch.Tensor:
+        """Return attention output shaped [tokens, query_heads, head_dim]."""
+        ...
 
 @dataclass(frozen=True, slots=True)
 class PagedKVMetadata:

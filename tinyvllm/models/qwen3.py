@@ -12,6 +12,7 @@ from torch import nn
 
 from tinyvllm.checkpoint import load_weights
 from tinyvllm.contiguous_kv import ContiguousKVCache
+from tinyvllm.runtime.contracts import AttentionBackend
 from tinyvllm.layers import (
     PackedLinear,
     RMSNorm,
@@ -283,6 +284,7 @@ class Qwen3Attention(nn.Module):
         past_len: int,
         attention_mask: torch.Tensor | None,
         is_causal: bool,
+        attention: AttentionBackend | None = None,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
 
@@ -320,6 +322,18 @@ class Qwen3Attention(nn.Module):
             q,
             k,
         )
+
+        if attention is not None:
+            output = attention(
+                layer_idx,
+                q,
+                k,
+                v,
+                scale=self.scale,
+            )
+            return self.o_proj(
+                output.reshape(num_tokens, -1)
+            )
 
         end = past_len + num_tokens
 
@@ -452,6 +466,7 @@ class Qwen3DecoderLayer(nn.Module):
         past_len: int,
         attention_mask: torch.Tensor | None,
         is_causal: bool,
+        attention: AttentionBackend | None = None,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -466,6 +481,7 @@ class Qwen3DecoderLayer(nn.Module):
             past_len=past_len,
             attention_mask=attention_mask,
             is_causal=is_causal,
+            attention=attention,
         )
 
         residual = hidden_states
@@ -530,6 +546,7 @@ class Qwen3Model(nn.Module):
         positions: torch.Tensor | None = None,
         *,
         cache: ContiguousKVCache | None = None,
+        attention: AttentionBackend | None = None,
     ) -> torch.Tensor:
         if input_ids.ndim != 1:
             raise ValueError(
@@ -554,29 +571,37 @@ class Qwen3Model(nn.Module):
             else 0
         )
 
-        expected_positions = torch.arange(
-            past_len,
-            past_len + num_tokens,
-            device=input_ids.device,
-        )
-
-        if positions is None:
-            positions = expected_positions
-        else:
-            if positions.dtype is not torch.long:
-                raise TypeError(
-                    "positions must use torch.long"
+        if attention is not None:
+            if cache is not None:
+                raise ValueError(
+                    "cache and attention are mutually exclusive"
+                )
+            if positions is None:
+                raise ValueError(
+                    "batched attention requires explicit positions"
                 )
 
+        if positions is not None:
+            if positions.dtype is not torch.long:
+                raise TypeError("positions must use torch.long")
             if positions.device != input_ids.device:
                 raise ValueError(
                     "positions and input_ids must share a device"
                 )
+            if positions.shape != input_ids.shape:
+                raise ValueError(
+                    "positions must align with input_ids"
+                )
 
-            if not torch.equal(
-                positions,
-                expected_positions,
-            ):
+        if attention is None:
+            expected_positions = torch.arange(
+                past_len,
+                past_len + num_tokens,
+                device=input_ids.device,
+            )
+            if positions is None:
+                positions = expected_positions
+            elif not torch.equal(positions, expected_positions):
                 raise ValueError(
                     "positions must be contiguous after the cache"
                 )
@@ -584,7 +609,7 @@ class Qwen3Model(nn.Module):
         attention_mask = None
         is_causal = past_len == 0
 
-        if past_len and num_tokens > 1:
+        if attention is None and past_len and num_tokens > 1:
             query_positions = torch.arange(
                 past_len,
                 past_len + num_tokens,
@@ -613,6 +638,7 @@ class Qwen3Model(nn.Module):
                 past_len=past_len,
                 attention_mask=attention_mask,
                 is_causal=is_causal,
+                attention=attention,
             )
 
         hidden_states = self.norm(hidden_states)
@@ -820,11 +846,13 @@ class Qwen3ForCausalLM(nn.Module):
         positions: torch.Tensor | None = None,
         *,
         cache: ContiguousKVCache | None = None,
+        attention: AttentionBackend | None = None,
     ) -> torch.Tensor:
         return self.model(
             input_ids,
             positions,
             cache=cache,
+            attention=attention,
         )
 
     def compute_logits(
