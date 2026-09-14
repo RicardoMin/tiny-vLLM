@@ -25,7 +25,7 @@ from tinyvllm.batch import (
     StepMode,
 )
 from tinyvllm.executor import CpuFakeExecutor
-from tinyvllm.cache import KvTxnState
+from tinyvllm.cache import BlockTxnState
 
 
 def command(
@@ -56,8 +56,8 @@ def make_scheduler(
     model_len: int = 32,
     reserve_tokens: int = 128,
     reserve_rows: int = 1,
-    kv_page_size: int = 16,
-    kv_num_pages: int | None = None,
+    kv_block_size: int = 16,
+    kv_num_blocks: int | None = None,
     eos_token_ids: Iterable[int] | None = None,
 ) -> Scheduler:
     return Scheduler(
@@ -68,8 +68,8 @@ def make_scheduler(
         max_model_len=model_len,
         prefill_reserve_tokens=reserve_tokens,
         prefill_reserve_requests=reserve_rows,
-        kv_page_size=kv_page_size,
-        kv_num_pages=kv_num_pages,
+        kv_block_size=kv_block_size,
+        kv_num_blocks=kv_num_blocks,
         eos_token_ids=eos_token_ids,
     )
 
@@ -357,9 +357,9 @@ def test_mark_dispatched_publishes_runtime_ownership() -> None:
     scheduler.mark_dispatched(txn, now_ns=12)
 
     assert txn.state is TxnState.DISPATCHED
-    assert txn.kv.state is KvTxnState.DISPATCHED
-    assert scheduler.kv_manager.page_table(10)
-    assert scheduler.kv_manager.valid_token_count(10) == 0
+    assert txn.kv.state is BlockTxnState.DISPATCHED
+    assert scheduler.block_manager.block_table(10)
+    assert scheduler.block_manager.valid_token_count(10) == 0
     assert scheduler.has_open_transaction
     assert scheduler.waiting_request_ids == (12,)
     assert (
@@ -460,12 +460,12 @@ def test_commit_request_lifecycle(
         2 if finished_ids else None
     )
     assert txn.state is TxnState.COMMITTED
-    assert txn.kv.state is KvTxnState.COMMITTED
+    assert txn.kv.state is BlockTxnState.COMMITTED
     assert not scheduler.has_open_transaction
 
     if finished_ids:
-        assert scheduler.kv_manager.page_table(10) == ()
-        assert scheduler.kv_manager.valid_token_count(10) == 0
+        assert scheduler.block_manager.block_table(10) == ()
+        assert scheduler.block_manager.valid_token_count(10) == 0
         scheduler.apply_commands(
             (command(1, 11),),
             now_ns=3,
@@ -515,8 +515,8 @@ def test_bad_result_fails_before_publish(
     assert scheduler.get_request(11).inflight_plan_id is None
     assert scheduler.waiting_request_ids == ()
     assert txn.state is TxnState.FAILED
-    assert txn.kv.state is KvTxnState.FAILED
-    assert scheduler.kv_manager.valid_token_count(10) == 0
+    assert txn.kv.state is BlockTxnState.FAILED
+    assert scheduler.block_manager.valid_token_count(10) == 0
     assert not scheduler.has_open_transaction
 
 
@@ -532,9 +532,9 @@ def test_executor_failure_is_fail_stop() -> None:
 
     request = scheduler.get_request(10)
     assert txn.state is TxnState.FAILED
-    assert txn.kv.state is KvTxnState.FAILED
+    assert txn.kv.state is BlockTxnState.FAILED
     assert request.inflight_plan_id is None
-    assert scheduler.kv_manager.page_table(10) == ()
+    assert scheduler.block_manager.block_table(10) == ()
     assert not scheduler.has_open_transaction
 
     with pytest.raises(RuntimeError, match="scheduler is failed"):
@@ -838,32 +838,32 @@ def test_begin_step_reserves_kv_without_publishing_table() -> None:
         tokens=4,
         chunk=4,
         model_len=8,
-        kv_page_size=4,
-        kv_num_pages=2,
+        kv_block_size=4,
+        kv_num_blocks=2,
     )
     scheduler.apply_commands(
         (command(0, 10, prompt_len=3),),
         now_ns=0,
     )
 
-    initial_free = scheduler.kv_manager.allocator.free_page_count
+    initial_free = scheduler.block_manager.pool.free_block_count
     txn = scheduler.begin_step(now_ns=0)
 
     assert txn is not None
-    assert txn.kv.state is KvTxnState.PREPARED
-    assert scheduler.kv_manager.page_table(10) == ()
-    assert txn.kv.staged_page_table(10)
+    assert txn.kv.state is BlockTxnState.PREPARED
+    assert scheduler.block_manager.block_table(10) == ()
+    assert txn.kv.staged_block_table(10)
     assert (
-        scheduler.kv_manager.allocator.free_page_count
+        scheduler.block_manager.pool.free_block_count
         == initial_free - 1
     )
 
     scheduler.rollback(txn)
 
-    assert txn.kv.state is KvTxnState.ROLLED_BACK
-    assert scheduler.kv_manager.page_table(10) == ()
+    assert txn.kv.state is BlockTxnState.ROLLED_BACK
+    assert scheduler.block_manager.block_table(10) == ()
     assert (
-        scheduler.kv_manager.allocator.free_page_count
+        scheduler.block_manager.pool.free_block_count
         == initial_free
     )
 
@@ -875,8 +875,8 @@ def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
         tokens=10,
         chunk=8,
         model_len=8,
-        kv_page_size=4,
-        kv_num_pages=1,
+        kv_block_size=4,
+        kv_num_blocks=1,
     )
 
     scheduler.apply_commands(
@@ -899,7 +899,7 @@ def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
 
     scheduler.apply_commands((), now_ns=1)
     before = committed_state(scheduler)
-    before_allocator = scheduler.kv_manager.allocator.snapshot()
+    before_pool = scheduler.block_manager.pool.snapshot()
 
     assert scheduler.begin_step(now_ns=1) is None
     assert scheduler.last_decision is ScheduleDecision.BLOCKED
@@ -907,11 +907,11 @@ def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
 
     assert committed_state(scheduler) == before
     assert (
-        scheduler.kv_manager.allocator.snapshot()
-        == before_allocator
+        scheduler.block_manager.pool.snapshot()
+        == before_pool
     )
-    assert scheduler.kv_manager.page_table(10)
-    assert scheduler.kv_manager.valid_token_count(10) == 4
+    assert scheduler.block_manager.block_table(10)
+    assert scheduler.block_manager.valid_token_count(10) == 4
     assert not scheduler.has_open_transaction
 
 
@@ -919,15 +919,15 @@ def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
     scheduler = make_scheduler(
         active=1,
         model_len=8,
-        kv_page_size=4,
-        kv_num_pages=2,
+        kv_block_size=4,
+        kv_num_blocks=2,
     )
     scheduler.apply_commands(
         (command(0, 10, prompt_len=5),),
         now_ns=0,
     )
 
-    before_allocator = scheduler.kv_manager.allocator.snapshot()
+    before_pool = scheduler.block_manager.pool.snapshot()
     txn = scheduler.begin_step(now_ns=0)
 
     assert txn is not None
@@ -941,14 +941,16 @@ def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
 
     scheduler.rollback(txn)
 
-    assert txn.kv.state is KvTxnState.ROLLED_BACK
-    assert scheduler.kv_manager.page_table(10) == ()
+    assert txn.kv.state is BlockTxnState.ROLLED_BACK
+    assert scheduler.block_manager.block_table(10) == ()
 
-    after_allocator = scheduler.kv_manager.allocator.snapshot()
-    assert after_allocator[0] == before_allocator[0]
-    assert after_allocator[2] == before_allocator[2]
-    assert after_allocator[1][0] == (
-        before_allocator[1][0] + 1
+    after_pool = scheduler.block_manager.pool.snapshot()
+    assert after_pool[0] == before_pool[0]
+    assert after_pool[2] == before_pool[2]
+    # The reservation is freed (ids and states restored) but the
+    # reserved block's generation is never rewound.
+    assert sum(after_pool[1]) == (
+        sum(before_pool[1]) + 1
     )
 
 
@@ -959,8 +961,8 @@ def test_kv_fallback_runs_decode_that_reuses_a_partial_page() -> None:
         tokens=8,
         chunk=8,
         model_len=8,
-        kv_page_size=4,
-        kv_num_pages=2,
+        kv_block_size=4,
+        kv_num_blocks=2,
     )
     scheduler.apply_commands(
         (
@@ -995,7 +997,7 @@ def test_kv_fallback_runs_decode_that_reuses_a_partial_page() -> None:
     )
 
     assert scheduler.get_request(11).status is RequestStatus.FINISHED
-    assert scheduler.kv_manager.allocator.free_page_count == 1
+    assert scheduler.block_manager.pool.free_block_count == 1
 
     scheduler.apply_commands((), now_ns=6)
     next_txn = scheduler.begin_step(now_ns=6)
@@ -1016,8 +1018,8 @@ def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
         tokens=8,
         chunk=8,
         model_len=8,
-        kv_page_size=4,
-        kv_num_pages=1,
+        kv_block_size=4,
+        kv_num_blocks=1,
     )
     scheduler.apply_commands(
         (
@@ -1066,11 +1068,11 @@ def test_terminal_release_precedes_consumption() -> None:
         active=1,
         tokens=4,
         chunk=4,
-        kv_page_size=2,
-        kv_num_pages=4,
+        kv_block_size=2,
+        kv_num_blocks=4,
     )
 
-    total_pages = scheduler.kv_manager.allocator.num_pages
+    total_pages = scheduler.block_manager.pool.num_blocks
 
     scheduler.apply_commands(
         (
@@ -1095,9 +1097,9 @@ def test_terminal_release_precedes_consumption() -> None:
     ).status is RequestStatus.FINISHED
 
     # KV is released before the result is consumed.
-    assert scheduler.kv_manager.page_table(10) == ()
-    assert scheduler.kv_manager.valid_token_count(10) == 0
-    assert scheduler.kv_manager.free_page_count == total_pages
+    assert scheduler.block_manager.block_table(10) == ()
+    assert scheduler.block_manager.valid_token_count(10) == 0
+    assert scheduler.block_manager.free_block_count == total_pages
 
     assert scheduler.completed_request_ids == (10,)
 
@@ -1169,8 +1171,8 @@ def test_kv_fallback_truncates_prefill_chunk() -> None:
         model_len=8,
         reserve_tokens=0,
         reserve_rows=0,
-        kv_page_size=4,
-        kv_num_pages=1,
+        kv_block_size=4,
+        kv_num_blocks=1,
     )
 
     scheduler.apply_commands(

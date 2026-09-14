@@ -22,8 +22,8 @@ def prepared_batch(*, with_kv: bool) -> PreparedBatch:
         sample_token_indices=(0,),
         sample_request_ids=(99,),
         sampling_params=(SamplingParams(),),
-        kv_page_table_ids=(7, 9) if with_kv else (),
-        kv_page_table_offsets=(0, 1, 2) if with_kv else (),
+        kv_block_table_ids=(7, 9) if with_kv else (),
+        kv_block_table_offsets=(0, 1, 2) if with_kv else (),
         kv_slot_mapping=(19, 24, 25) if with_kv else (),
     )
 
@@ -56,11 +56,11 @@ def test_model_input_lowers_execution_metadata() -> None:
 
     assert model_input.kv is not None
     assert torch.equal(
-        model_input.kv.page_table_ids,
+        model_input.kv.block_table_ids,
         torch.tensor([7, 9], dtype=torch.int32),
     )
     assert torch.equal(
-        model_input.kv.page_table_offsets,
+        model_input.kv.block_table_offsets,
         torch.tensor([0, 1, 2], dtype=torch.int32),
     )
     assert torch.equal(

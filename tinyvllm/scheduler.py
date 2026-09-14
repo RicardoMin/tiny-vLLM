@@ -21,9 +21,9 @@ from tinyvllm._validation import (
 )
 
 from tinyvllm.cache import (
-    KvAppend,
-    KvPageManager,
-    KvPlanTxn,
+    BlockAppend,
+    BlockManager,
+    BlockPlanTxn,
 )
 
 
@@ -97,7 +97,7 @@ class SchedulerResourceError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ScheduleTxn:
     plan: StepPlan
-    kv: KvPlanTxn
+    kv: BlockPlanTxn
     rotate_prefill: bool = False
     kv_fallback: bool = False
     state: TxnState = field(default=TxnState.PREPARED, init=False)
@@ -114,8 +114,8 @@ class Scheduler:
         max_model_len: int,
         prefill_reserve_tokens: int = 128,
         prefill_reserve_requests: int = 1,
-        kv_page_size: int = 16,
-        kv_num_pages: int | None = None,
+        kv_block_size: int = 16,
+        kv_num_blocks: int | None = None,
         eos_token_ids: Iterable[int] | None = None,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
@@ -123,7 +123,7 @@ class Scheduler:
         _check_positive_int("max_scheduled_tokens", max_scheduled_tokens)
         _check_positive_int("prefill_chunk_size", prefill_chunk_size)
         _check_positive_int("max_model_len", max_model_len)
-        _check_positive_int("kv_page_size", kv_page_size)
+        _check_positive_int("kv_block_size", kv_block_size)
         _check_non_negative_int("prefill_reserve_tokens", prefill_reserve_tokens)
         _check_non_negative_int("prefill_reserve_requests", prefill_reserve_requests)
 
@@ -147,12 +147,12 @@ class Scheduler:
                 "prefill_chunk_size exceeds the step token budget"
             )
 
-        if kv_num_pages is None:
-            kv_num_pages = max_active_requests * (
-                (max_model_len + kv_page_size - 1) // kv_page_size
+        if kv_num_blocks is None:
+            kv_num_blocks = max_active_requests * (
+                (max_model_len + kv_block_size - 1) // kv_block_size
             )
         else:
-            _check_positive_int("kv_num_pages", kv_num_pages)
+            _check_positive_int("kv_num_blocks", kv_num_blocks)
 
 
         self.max_active_requests = max_active_requests
@@ -162,10 +162,10 @@ class Scheduler:
         self.max_model_len = max_model_len
         self.prefill_reserve_tokens = prefill_reserve_tokens
         self.prefill_reserve_requests = prefill_reserve_requests
-        self.kv_page_size = kv_page_size
-        self._kv_manager = KvPageManager(
-            page_size=kv_page_size,
-            num_pages=kv_num_pages,
+        self.kv_block_size = kv_block_size
+        self._block_manager = BlockManager(
+            block_size=kv_block_size,
+            num_blocks=kv_num_blocks,
         )
 
         self._eos_token_ids = _normalize_token_ids("eos_token_ids", eos_token_ids) if eos_token_ids is not None else set()
@@ -228,8 +228,8 @@ class Scheduler:
 
 
     @property
-    def kv_manager(self) -> KvPageManager:
-        return self._kv_manager
+    def block_manager(self) -> BlockManager:
+        return self._block_manager
 
 
     @property
@@ -515,10 +515,10 @@ class Scheduler:
             items=tuple(items),
         )
 
-        kv_txn = self._kv_manager.begin_plan(
+        kv_txn = self._block_manager.begin_plan(
             plan_id=plan.plan_id,
             appends=tuple(
-                KvAppend(
+                BlockAppend(
                     request_id=item.request_id,
                     token_start=item.token_start,
                     query_len=item.query_len,
@@ -539,10 +539,10 @@ class Scheduler:
                 plan_id=plan.plan_id,
                 items=tuple(items),
             )
-            kv_txn = self._kv_manager.begin_plan(
+            kv_txn = self._block_manager.begin_plan(
                 plan_id=plan.plan_id,
                 appends=tuple(
-                    KvAppend(
+                    BlockAppend(
                         request_id=item.request_id,
                         token_start=item.token_start,
                         query_len=item.query_len,
@@ -781,25 +781,25 @@ class Scheduler:
     def _max_prefill_tokens(
         self,
         item: WorkItem,
-        remaining_pages: int,
+        remaining_blocks: int,
     ) -> int:
-        allocated_pages = len(
-            self._kv_manager.page_table(item.request_id)
+        allocated_blocks = len(
+            self._block_manager.block_table(item.request_id)
         )
         tail_capacity = (
-            allocated_pages * self.kv_page_size
+            allocated_blocks * self.kv_block_size
             - item.token_start
         )
         return max(
             0,
-            tail_capacity + remaining_pages * self.kv_page_size,
+            tail_capacity + remaining_blocks * self.kv_block_size,
         )
 
     def _fit_kv_capacity(
         self,
         items: list[WorkItem],
     ) -> list[WorkItem]:
-        remaining_pages = self._kv_manager.free_page_count
+        remaining_blocks = self._block_manager.free_block_count
         selected: list[WorkItem] = []
 
         for item in items:
@@ -810,7 +810,7 @@ class Scheduler:
                     query_len,
                     self._max_prefill_tokens(
                         item,
-                        remaining_pages,
+                        remaining_blocks,
                     ),
                 )
 
@@ -825,19 +825,19 @@ class Scheduler:
                     item.work_class,
                     query_len,
                 )
-            
-            append = KvAppend(
+
+            append = BlockAppend(
                 request_id=item.request_id,
                 token_start=item.token_start,
                 query_len=item.query_len,
             )
-            new_pages = self._kv_manager.required_new_pages(append)
+            new_blocks = self._block_manager.required_new_blocks(append)
 
-            if new_pages > remaining_pages:
+            if new_blocks > remaining_blocks:
                 continue
 
             selected.append(item)
-            remaining_pages -= new_pages
+            remaining_blocks -= new_blocks
 
         if not selected:
             return []
@@ -989,7 +989,7 @@ class Scheduler:
             self._slot_request_ids[request.active_slot] = None
             request.active_slot = None
 
-        self._kv_manager.release_request(
+        self._block_manager.release_request(
             request.request_id
         )
 

@@ -59,8 +59,8 @@ def test_executor_closes_one_request_scheduler_loop() -> None:
         max_scheduled_tokens=8,
         prefill_chunk_size=8,
         max_model_len=32,
-        kv_page_size=4,
-        kv_num_pages=8,
+        kv_block_size=4,
+        kv_num_blocks=8,
     )
 
     builder = BatchBuilder(max_model_len=32)

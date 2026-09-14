@@ -3,15 +3,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tinyvllm.cache import KvAppend, KvPageManager
+from tinyvllm.cache import BlockAppend, BlockManager, BlockRef
 from tinyvllm.paged_kv import PagedKVCache
 
 
 def make_store() -> PagedKVCache:
     return PagedKVCache(
         num_layers=2,
-        num_pages=4,
-        page_size=2,
+        num_blocks=4,
+        block_size=2,
         num_kv_heads=1,
         head_dim=2,
         device="cpu",
@@ -19,35 +19,11 @@ def make_store() -> PagedKVCache:
     )
 
 
-def test_logical_slots_cross_page_in_order() -> None:
-    manager = KvPageManager(
-        page_size=2,
-        num_pages=4,
-    )
-
-    txn = manager.begin_plan(
-        plan_id=0,
-        appends=(
-            KvAppend(
-                request_id=5,
-                token_start=0,
-                query_len=5,
-            ),
-        ),
-    )
-
-    assert txn is not None
-
-    refs = txn.staged_page_table(5)
+def test_logical_slots_preserve_noncontiguous_block_order() -> None:
     store = make_store()
-
-    slots = store.logical_slots(
-        refs,
-        start=1,
-        end=5,
-    )
-
-    assert slots.tolist() == [1, 2, 3, 4]
+    refs = (BlockRef(3, 1), BlockRef(0, 1), BlockRef(2, 1))
+    slots = store.logical_slots(refs, start=1, end=5)
+    assert slots.tolist() == [7, 0, 1, 4]
 
 
 def test_empty_range_needs_no_page() -> None:
@@ -63,15 +39,15 @@ def test_empty_range_needs_no_page() -> None:
 
 
 def test_write_read_preserves_order_and_layers() -> None:
-    manager = KvPageManager(
-        page_size=2,
-        num_pages=4,
+    manager = BlockManager(
+        block_size=2,
+        num_blocks=4,
     )
 
     txn = manager.begin_plan(
         plan_id=0,
         appends=(
-            KvAppend(
+            BlockAppend(
                 request_id=5,
                 token_start=0,
                 query_len=5,
@@ -81,7 +57,7 @@ def test_write_read_preserves_order_and_layers() -> None:
 
     assert txn is not None
 
-    refs = txn.staged_page_table(5)
+    refs = txn.staged_block_table(5)
     store = make_store()
 
     slots = store.logical_slots(
@@ -129,15 +105,15 @@ def test_write_read_preserves_order_and_layers() -> None:
 
 
 def test_partial_page_append_and_page_reuse() -> None:
-    manager = KvPageManager(
-        page_size=2,
-        num_pages=2,
+    manager = BlockManager(
+        block_size=2,
+        num_blocks=2,
     )
 
     first = manager.begin_plan(
         plan_id=0,
         appends=(
-            KvAppend(
+            BlockAppend(
                 request_id=1,
                 token_start=0,
                 query_len=1,
@@ -148,7 +124,7 @@ def test_partial_page_append_and_page_reuse() -> None:
     assert first is not None
 
     first.commit_before_dispatch()
-    refs = first.staged_page_table(1)
+    refs = first.staged_block_table(1)
 
     store = make_store()
     old_slots = store.logical_slots(
@@ -174,7 +150,7 @@ def test_partial_page_append_and_page_reuse() -> None:
     second = manager.begin_plan(
         plan_id=1,
         appends=(
-            KvAppend(
+            BlockAppend(
                 request_id=2,
                 token_start=0,
                 query_len=1,
@@ -184,9 +160,9 @@ def test_partial_page_append_and_page_reuse() -> None:
 
     assert second is not None
 
-    new_refs = second.staged_page_table(2)
+    new_refs = second.staged_block_table(2)
 
-    assert new_refs[0].page_id == refs[0].page_id
+    assert new_refs[0].block_id == refs[0].block_id
     assert new_refs[0].generation != refs[0].generation
 
     new_slots = store.logical_slots(
@@ -215,15 +191,15 @@ def test_partial_page_append_and_page_reuse() -> None:
 
 
 def test_rejects_short_table_and_bad_rows() -> None:
-    manager = KvPageManager(
-        page_size=2,
-        num_pages=2,
+    manager = BlockManager(
+        block_size=2,
+        num_blocks=2,
     )
 
     txn = manager.begin_plan(
         plan_id=0,
         appends=(
-            KvAppend(
+            BlockAppend(
                 request_id=1,
                 token_start=0,
                 query_len=1,
@@ -237,7 +213,7 @@ def test_rejects_short_table_and_bad_rows() -> None:
 
     with pytest.raises(ValueError, match="too short"):
         store.logical_slots(
-            txn.staged_page_table(1),
+            txn.staged_block_table(1),
             start=0,
             end=3,
         )
@@ -293,8 +269,8 @@ def test_rejects_out_of_range_slots(slot: int) -> None:
 def test_unindexed_cuda_device_uses_current_device() -> None:
     store = PagedKVCache(
         num_layers=1,
-        num_pages=1,
-        page_size=1,
+        num_blocks=1,
+        block_size=1,
         num_kv_heads=1,
         head_dim=2,
         device="cuda",

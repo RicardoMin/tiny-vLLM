@@ -19,8 +19,8 @@ from tinyvllm.request import (
 )
 
 from tinyvllm.cache import (
-    KvAppend,
-    KvPageManager,
+    BlockAppend,
+    BlockManager,
 )
 
 
@@ -198,11 +198,11 @@ def test_step_result_copies_and_validates_parallel_arrays() -> None:
 
 
 def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
-    manager = KvPageManager(page_size=4, num_pages=4)
+    manager = BlockManager(block_size=4, num_blocks=4)
 
     initial = manager.begin_plan(
         plan_id=1,
-        appends=(KvAppend(2, 0, 3),),
+        appends=(BlockAppend(2, 0, 3),),
     )
     assert initial is not None
     initial.commit_before_dispatch()
@@ -222,8 +222,8 @@ def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
     txn = manager.begin_plan(
         plan_id=plan.plan_id,
         appends=(
-            KvAppend(2, 3, 1),
-            KvAppend(1, 0, 3),
+            BlockAppend(2, 3, 1),
+            BlockAppend(1, 0, 3),
         ),
     )
     assert txn is not None
@@ -234,25 +234,30 @@ def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
         kv=txn,
     )
 
+    decode_id = txn.staged_block_table(2)[0].block_id
+    prefill_id = txn.staged_block_table(1)[0].block_id
+    assert decode_id != prefill_id
     assert batch.has_kv_metadata
-    assert batch.kv_page_table_ids == (0, 1)
-    assert batch.kv_page_table_offsets == (0, 1, 2)
-    assert batch.kv_slot_mapping == (3, 4, 5, 6)
+    assert batch.kv_block_table_ids == (decode_id, prefill_id)
+    assert batch.kv_block_table_offsets == (0, 1, 2)
+    assert batch.kv_slot_mapping == (
+        decode_id * 4 + 3, prefill_id * 4, prefill_id * 4 + 1, prefill_id * 4 + 2,
+    )
 
-    for index, expected in enumerate(((0,), (1,))):
-        start = batch.kv_page_table_offsets[index]
-        end = batch.kv_page_table_offsets[index + 1]
-        assert batch.kv_page_table_ids[start:end] == expected
+    for index, expected in enumerate(((decode_id,), (prefill_id,))):
+        start = batch.kv_block_table_offsets[index]
+        end = batch.kv_block_table_offsets[index + 1]
+        assert batch.kv_block_table_ids[start:end] == expected
 
     txn.rollback()
 
 
-def test_builder_keeps_partial_page_slots_when_page_table_grows() -> None:
-    manager = KvPageManager(page_size=4, num_pages=4)
+def test_builder_keeps_partial_page_slots_when_block_table_grows() -> None:
+    manager = BlockManager(block_size=4, num_blocks=4)
 
     first = manager.begin_plan(
         plan_id=40,
-        appends=(KvAppend(1, 0, 3),),
+        appends=(BlockAppend(1, 0, 3),),
     )
     assert first is not None
     first.commit_before_dispatch()
@@ -260,7 +265,7 @@ def test_builder_keeps_partial_page_slots_when_page_table_grows() -> None:
 
     second = manager.begin_plan(
         plan_id=41,
-        appends=(KvAppend(1, 3, 3),),
+        appends=(BlockAppend(1, 3, 3),),
     )
     assert second is not None
 
@@ -290,8 +295,15 @@ def test_builder_keeps_partial_page_slots_when_page_table_grows() -> None:
         kv=second,
     )
 
-    assert batch.kv_page_table_ids == (0, 1)
-    assert batch.kv_page_table_offsets == (0, 2)
-    assert batch.kv_slot_mapping == (3, 4, 5)
+    first_id, second_id = (
+        ref.block_id for ref in second.staged_block_table(1)
+    )
+    assert first_id == manager.block_table(1)[0].block_id
+    assert first_id != second_id
+    assert batch.kv_block_table_ids == (first_id, second_id)
+    assert batch.kv_block_table_offsets == (0, 2)
+    assert batch.kv_slot_mapping == (
+        first_id * 4 + 3, second_id * 4, second_id * 4 + 1,
+    )
 
     second.rollback()

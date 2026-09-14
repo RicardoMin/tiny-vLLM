@@ -27,8 +27,8 @@ def make_engine(
         max_model_len=16,
         prefill_reserve_tokens=1,
         prefill_reserve_requests=1,
-        kv_page_size=4,
-        kv_num_pages=16,
+        kv_block_size=4,
+        kv_num_blocks=16,
         eos_token_ids=eos_token_ids,
     )
 
@@ -206,8 +206,8 @@ def test_executor_failure_tears_down_dispatched_state() -> None:
 
     assert executor.clear_calls == 1
     assert not engine.scheduler.has_open_transaction
-    assert engine.scheduler.kv_manager.free_page_count == (
-        engine.scheduler.kv_manager.allocator.num_pages
+    assert engine.scheduler.block_manager.free_block_count == (
+        engine.scheduler.block_manager.pool.num_blocks
     )
 
     with pytest.raises(RuntimeError, match="engine is failed"):

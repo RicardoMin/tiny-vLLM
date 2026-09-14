@@ -11,7 +11,7 @@ from tinyvllm.request import (
 
 from tinyvllm._validation import _check_positive_int
 
-from tinyvllm.cache import KvPlanTxn
+from tinyvllm.cache import BlockPlanTxn
 
 class StepMode(Enum):
     PREFILL_ONLY = auto()
@@ -116,8 +116,8 @@ class PreparedBatch:
     sample_request_ids: tuple[int, ...]
     sampling_params: tuple[SamplingParams, ...]
 
-    kv_page_table_ids: tuple[int, ...] = ()
-    kv_page_table_offsets: tuple[int, ...] = ()
+    kv_block_table_ids: tuple[int, ...] = ()
+    kv_block_table_offsets: tuple[int, ...] = ()
     kv_slot_mapping: tuple[int, ...] = ()
 
     request_ids: tuple[int, ...] = ()
@@ -141,7 +141,7 @@ class PreparedBatch:
 
     @property
     def has_kv_metadata(self) -> bool:
-        return bool(self.kv_page_table_offsets)
+        return bool(self.kv_block_table_offsets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +181,7 @@ class BatchBuilder:
         plan: StepPlan,
         requests: tuple[RequestState, ...],
         *,
-        kv: KvPlanTxn | None = None,
+        kv: BlockPlanTxn | None = None,
     ) -> PreparedBatch:
         if len(requests) != len(plan.items):
             raise ValueError(
@@ -206,8 +206,8 @@ class BatchBuilder:
         sample_request_ids: list[int] = []
         sampling_params: list[SamplingParams] = []
 
-        kv_page_table_ids: list[int] = []
-        kv_page_table_offsets = [0] if kv is not None else []
+        kv_block_table_ids: list[int] = []
+        kv_block_table_offsets = [0] if kv is not None else []
         kv_slot_mapping: list[int] = []
 
         request_ids: list[int] = []
@@ -234,7 +234,7 @@ class BatchBuilder:
                 )
 
             if kv is not None:
-                page_table = kv.staged_page_table(
+                block_table = kv.staged_block_table(
                     item.request_id
                 )
                 slot_mapping = kv.slot_mapping(
@@ -246,11 +246,11 @@ class BatchBuilder:
                         "KV slot mapping length does not match query_len"
                     )
 
-                kv_page_table_ids.extend(
-                    ref.page_id for ref in page_table
+                kv_block_table_ids.extend(
+                    ref.block_id for ref in block_table
                 )
-                kv_page_table_offsets.append(
-                    len(kv_page_table_ids)
+                kv_block_table_offsets.append(
+                    len(kv_block_table_ids)
                 )
                 kv_slot_mapping.extend(slot_mapping)
 
@@ -295,8 +295,8 @@ class BatchBuilder:
             sample_token_indices=tuple(sample_token_indices),
             sample_request_ids=tuple(sample_request_ids),
             sampling_params=tuple(sampling_params),
-            kv_page_table_ids=tuple(kv_page_table_ids),
-            kv_page_table_offsets=tuple(kv_page_table_offsets),
+            kv_block_table_ids=tuple(kv_block_table_ids),
+            kv_block_table_offsets=tuple(kv_block_table_offsets),
             kv_slot_mapping=tuple(kv_slot_mapping),
             request_ids=tuple(request_ids),
         )

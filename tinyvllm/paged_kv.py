@@ -8,12 +8,12 @@ from tinyvllm._validation import (
     _check_non_negative_int,
     _check_positive_int,
 )
-from tinyvllm.cache import PageRef
+from tinyvllm.cache import BlockRef
 
 class PagedKVCache:
     """Physical K/V storage addressed by logical page tables.
-    
-    The allocator owns page lifetime. This class owns only device tensors and
+
+    The pool owns page lifetime. This class owns only device tensors and
     translates logical token positions into flat physical slots.
     """
 
@@ -21,8 +21,8 @@ class PagedKVCache:
         self,
         *,
         num_layers: int,
-        num_pages: int,
-        page_size: int,
+        num_blocks: int,
+        block_size: int,
         num_kv_heads: int,
         head_dim: int,
         device: torch.device | str,
@@ -30,8 +30,8 @@ class PagedKVCache:
     ) -> None:
         for name, value in (
             ("num_layers", num_layers),
-            ("num_pages", num_pages),
-            ("page_size", page_size),
+            ("num_blocks", num_blocks),
+            ("block_size", block_size),
             ("num_kv_heads", num_kv_heads),
             ("head_dim", head_dim),
         ):
@@ -47,11 +47,11 @@ class PagedKVCache:
 
         self.dtype = dtype
         self.num_layers = num_layers
-        self.num_pages = num_pages
-        self.page_size = page_size
+        self.num_blocks = num_blocks
+        self.block_size = block_size
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.num_slots = num_pages * page_size
+        self.num_slots = num_blocks * block_size
 
         shape = (
             num_layers,
@@ -70,7 +70,7 @@ class PagedKVCache:
 
     def logical_slots(
         self,
-        page_table: Iterable[PageRef],
+        block_table: Iterable[BlockRef],
         *,
         start: int,
         end: int,
@@ -89,31 +89,31 @@ class PagedKVCache:
                 dtype=torch.long,
             )
 
-        refs = tuple(page_table)
+        refs = tuple(block_table)
 
-        required_pages = (
-            end + self.page_size -1
-        ) // self.page_size
+        required_blocks = (
+            end + self.block_size -1
+        ) // self.block_size
 
-        if required_pages > len(refs):
+        if required_blocks > len(refs):
             raise ValueError(
                 "page table is too short for the requested range"
             )
 
-        page_ids: list[int] = []
+        block_ids: list[int] = []
 
-        for ref in refs[:required_pages]:
-            if not isinstance(ref, PageRef):
+        for ref in refs[:required_blocks]:
+            if not isinstance(ref, BlockRef):
                 raise TypeError(
-                    "page_table must contain PageRef values"
+                    "block_table must contain BlockRef values"
                 )
 
-            if not 0 <= ref.page_id < self.num_pages:
+            if not 0 <= ref.block_id < self.num_blocks:
                 raise ValueError(
                     "page reference is outside this cache"
                 )
 
-            page_ids.append(ref.page_id)
+            block_ids.append(ref.block_id)
 
         positions = torch.arange(
             start,
@@ -122,17 +122,17 @@ class PagedKVCache:
             dtype=torch.long,
         )
 
-        physical_pages = torch.tensor(
-            page_ids,
+        physical_blocks = torch.tensor(
+            block_ids,
             device=self.device,
             dtype=torch.long,
         ).index_select(
             0,
-            positions // self.page_size,
+            positions // self.block_size,
         )
 
-        return physical_pages * self.page_size + positions.remainder(
-            self.page_size
+        return physical_blocks * self.block_size + positions.remainder(
+            self.block_size
         )
 
 

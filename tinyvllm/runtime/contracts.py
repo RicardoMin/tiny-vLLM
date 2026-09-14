@@ -27,8 +27,8 @@ class AttentionBackend(Protocol):
 class PagedKVMetadata:
     """Logical paged-KV metadata lowered for one device batch."""
 
-    page_table_ids: torch.Tensor
-    page_table_offsets: torch.Tensor
+    block_table_ids: torch.Tensor
+    block_table_offsets: torch.Tensor
     slot_mapping: torch.Tensor
 
 
@@ -64,12 +64,12 @@ class ModelInput:
         kv: PagedKVMetadata | None = None
         if batch.has_kv_metadata:
             kv = PagedKVMetadata(
-                page_table_ids=torch.tensor(
-                    batch.kv_page_table_ids,
+                block_table_ids=torch.tensor(
+                    batch.kv_block_table_ids,
                     **index_kwargs,
                 ),
-                page_table_offsets=torch.tensor(
-                    batch.kv_page_table_offsets,
+                block_table_offsets=torch.tensor(
+                    batch.kv_block_table_offsets,
                     **index_kwargs,
                 ),
                 slot_mapping=torch.tensor(

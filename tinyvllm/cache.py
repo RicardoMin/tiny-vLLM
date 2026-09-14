@@ -9,34 +9,30 @@ from tinyvllm._validation import (
 )
 
 
-class PageState(Enum):
+class BlockState(Enum):
     FREE = auto()
     RESERVED = auto()
-    PRIVATE_MUTABLE = auto()
+    ACTIVE = auto()
 
 
 @dataclass(frozen=True, slots=True)
-class PageRef:
-    page_id: int
+class BlockRef:
+    """Pool-local physical block identity; generation detects reuse."""
+    block_id: int
     generation: int
 
     def __post_init__(self) -> None:
-        _check_non_negative_int("page_id", self.page_id)
+        _check_non_negative_int("block_id", self.block_id)
         _check_non_negative_int("generation", self.generation)
 
 
 @dataclass(frozen=True, slots=True)
-class PageReservation:
-    txn_id: int
-    page_refs: tuple[PageRef, ...]
-
-    def __post_init__(self) -> None:
-        _check_non_negative_int("txn_id", self.txn_id)
-        object.__setattr__(self, "page_refs", tuple(self.page_refs))
+class BlockReservation:
+    block_refs: tuple[BlockRef, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class KvAppend:
+class BlockAppend:
     request_id: int
     token_start: int
     query_len: int
@@ -47,37 +43,34 @@ class KvAppend:
         _check_positive_int("query_len", self.query_len)
 
 
-class PageAllocator:
-    """CPU ownership table for physical KV pages."""
+class BlockPool():
+    """CPU block ownership for one serial scheduler, without GPU tensors."""
 
-    def __init__(self, *, num_pages: int) -> None:
-        _check_positive_int("num_pages", num_pages)
+    def __init__(self, *, num_blocks: int) -> None:
+        _check_positive_int("num_blocks", num_blocks)
+        self._generations = [0] * num_blocks
+        self._states = [BlockState.FREE] * num_blocks
+        self._free_ids = list(range(num_blocks - 1, -1, -1))
+        self._open_reservation: BlockReservation | None = None
 
-        self._generations = [0] * num_pages
-        self._states = [PageState.FREE] * num_pages
-
-        # The last element is popped first.
-        self._free_ids = list(range(num_pages - 1, -1, -1))
-
-        self._open_reservations: dict[int, PageReservation] = {}
 
     @property
-    def num_pages(self) -> int:
+    def num_blocks(self) -> int:
         return len(self._states)
 
     @property
-    def free_page_count(self) -> int:
+    def free_block_count(self) -> int:
         return len(self._free_ids)
 
     @property
     def open_reservation_count(self) -> int:
-        return len(self._open_reservations)
+        return int(self._open_reservation is not None)
 
 
     def snapshot(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[PageState, ...]]:
-        """Test-only deterministic state view."""
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[BlockState, ...]]:
+        """Diagnostic view; allocation order is not a public contract."""
         return (
             tuple(self._free_ids),
             tuple(self._generations),
@@ -85,128 +78,76 @@ class PageAllocator:
         )
 
 
-    def reserve(
-        self,
-        count: int,
-        txn_id: int,
-    ) -> PageReservation | None:
-        _check_non_negative_int("count", count)
-        _check_non_negative_int("txn_id", txn_id)
-
-        if txn_id in self._open_reservations:
-            raise ValueError(
-                f"transaction already owns a reservation: {txn_id}"
-            )
-
-        # This check happens before mutating any state.
-        if count > self.free_page_count:
+    def reserve(self, count: int) -> BlockReservation | None:
+        _check_positive_int("count", count)
+        if self._open_reservation is not None:
+            raise RuntimeError("a reservation is already open")
+        if count > self.free_block_count:
             return None
 
-        page_refs: list[PageRef] = []
-
+        refs = []
         for _ in range(count):
-            page_id = self._free_ids.pop()
+            block_id = self._free_ids.pop()
+            self._generations[block_id] += 1
+            self._states[block_id] = BlockState.RESERVED
+            refs.append(BlockRef(block_id, self._generations[block_id]))
 
-            # Increment on allocation, including after rollback.
-            generation = self._generations[page_id] + 1
-            self._generations[page_id] = generation
-            self._states[page_id] = PageState.RESERVED
-
-            page_refs.append(PageRef(page_id, generation))
-
-        reservation = PageReservation(
-            txn_id=txn_id,
-            page_refs=tuple(page_refs),
-        )
-        self._open_reservations[txn_id] = reservation
+        reservation = BlockReservation(tuple(refs))
+        self._open_reservation = reservation
         return reservation
 
 
-    def commit(self, reservation: PageReservation) -> None:
-        self._validate_open_reservation(reservation)
-        self._validate_reserved_pages(reservation)
+    def commit(self, reservation: BlockReservation) -> None:
+        self._validate_reservation(reservation)
+        for ref in reservation.block_refs:
+            self._states[ref.block_id] = BlockState.ACTIVE
 
-        for ref in reservation.page_refs:
-            self._states[ref.page_id] = PageState.PRIVATE_MUTABLE
-
-        del self._open_reservations[reservation.txn_id]
+        self._open_reservation = None
 
 
-    def rollback(self, reservation: PageReservation) -> None:
-        self._validate_open_reservation(reservation)
-        self._validate_reserved_pages(reservation)
+    def rollback(self, reservation: BlockReservation) -> None:
+        self._validate_reservation(reservation)
 
-        for ref in reservation.page_refs:
-            self._states[ref.page_id] = PageState.FREE
+        for ref in reservation.block_refs:
+            self._states[ref.block_id] = BlockState.FREE
 
-        # reserve() popped page IDs in page_refs order.
-        # Reverse them to restore the original stack order.
-        self._free_ids.extend(
-            reversed(
-                tuple(ref.page_id for ref in reservation.page_refs)
-            )
-        )
-
-        # Generation is intentionally not rolled back.
-        del self._open_reservations[reservation.txn_id]
+        self._free_ids.extend(ref.block_id for ref in reversed(reservation.block_refs))
+        # Restore availability, but never rewind generation.
+        self._open_reservation = None
 
 
-    def release(self, ref: PageRef) -> None:
-        self._validate_ref(ref)
-
-        if self._states[ref.page_id] is not PageState.PRIVATE_MUTABLE:
-            raise RuntimeError(
-                "only private mutable pages can be released"
-            )
-
-        self._states[ref.page_id] = PageState.FREE
-        self._free_ids.append(ref.page_id)
+    def release(self, ref: BlockRef) -> None:
+        if self.state(ref) is not BlockState.ACTIVE:
+            raise RuntimeError("block is not active")
+        self._states[ref.block_id] = BlockState.FREE
+        self._free_ids.append(ref.block_id)
 
 
-    def page_state(self, ref: PageRef) -> PageState:
-        self._validate_ref(ref)
-        return self._states[ref.page_id]
+    def state(self, ref: BlockRef) -> BlockState:
+        if not isinstance(ref, BlockRef):
+            raise TypeError("ref must be BlockRef")
+        if ref.block_id >= self.num_blocks:
+            raise ValueError("block_id is out of range")
+        if self._generations[ref.block_id] != ref.generation:
+            raise RuntimeError("stale BlockRef generation")
 
-    def _validate_open_reservation(
+        return self._states[ref.block_id]
+
+
+    def _validate_reservation(
         self,
-        reservation: PageReservation,
+        reservation: BlockReservation,
     ) -> None:
-        active = self._open_reservations.get(reservation.txn_id)
-
-        # Identity checking prevents an externally fabricated equivalent
-        # reservation from controlling the allocator.
-        if active is not reservation:
+        if self._open_reservation is not reservation:
             raise ValueError(
-                "reservation is not open in this allocator"
+                "reservation is not open in this pool"
             )
+        for ref in reservation.block_refs:
+            if self.state(ref) is not BlockState.RESERVED:
+                raise RuntimeError("block is not reserved")
 
 
-    def _validate_reserved_pages(
-        self,
-        reservation: PageReservation,
-    ) -> None:
-        for ref in reservation.page_refs:
-            self._validate_ref(ref)
-
-            if self._states[ref.page_id] is not PageState.RESERVED:
-                raise RuntimeError(
-                    "reservation contains a non-reserved page"
-                )
-
-
-    def _validate_ref(self, ref: PageRef) -> None:
-        if not isinstance(ref, PageRef):
-            raise TypeError("ref must be PageRef")
-
-        if ref.page_id >= self.num_pages:
-            raise ValueError("page_id is out of range")
-
-        if self._generations[ref.page_id] != ref.generation:
-            raise RuntimeError("stale PageRef generation")
-
-
-
-class KvTxnState(Enum):
+class BlockTxnState(Enum):
     PREPARED = auto()
     DISPATCHED = auto()
     COMMITTED = auto()
@@ -214,44 +155,43 @@ class KvTxnState(Enum):
     FAILED = auto()
 
 
-class KvPlanTxn:
-    """One step's staged KV page-table changes."""
+class BlockPlanTxn:
+    """One step's staged block-table changes."""
 
     __slots__ = (
         "_plan_id",
         "_state",
         "_manager",
         "_reservation",
-        "_page_tables",
+        "_block_tables",
         "_slot_mappings",
         "_token_ends",
         "_written_refs",
     )
 
-
     def __init__(
         self,
         *,
         plan_id: int,
-        manager: KvPageManager,
-        reservation: PageReservation | None,
-        page_tables: dict[int, tuple[PageRef, ...]],
+        manager: BlockManager,
+        reservation: BlockReservation | None,
+        block_tables: dict[int, tuple[BlockRef, ...]],
         slot_mappings: dict[int, tuple[int, ...]],
         token_ends: dict[int, int],
-        written_refs: tuple[PageRef, ...],
+        written_refs: tuple[BlockRef, ...],
     ) -> None:
         self._plan_id = plan_id
-        self._state = KvTxnState.PREPARED
+        self._state = BlockTxnState.PREPARED
         self._manager = manager
         self._reservation = reservation
-        self._page_tables = page_tables
+        self._block_tables = block_tables
         self._slot_mappings = slot_mappings
         self._token_ends = token_ends
         self._written_refs = written_refs
 
 
     @property
-    def state(self) -> KvTxnState:
+    def state(self) -> BlockTxnState:
         return self._state
 
     @property
@@ -260,19 +200,20 @@ class KvPlanTxn:
 
     def _ensure_metadata_readable(self) -> None:
         if self._state not in (
-            KvTxnState.PREPARED,
-            KvTxnState.DISPATCHED,
+            BlockTxnState.PREPARED,
+            BlockTxnState.DISPATCHED,
         ):
             raise RuntimeError(
-                "KV transaction metadata is no longer readable"
+                "block transaction metadata is no longer readable"
             )
 
-    def staged_page_table(
+
+    def staged_block_table(
         self,
         request_id: int,
-    ) -> tuple[PageRef, ...]:
+    ) -> tuple[BlockRef, ...]:
         self._ensure_metadata_readable()
-        return self._page_tables[request_id]
+        return self._block_tables[request_id]
 
     def slot_mapping(self, request_id: int) -> tuple[int, ...]:
         self._ensure_metadata_readable()
@@ -281,7 +222,7 @@ class KvPlanTxn:
     def commit_before_dispatch(self) -> None:
         self._manager._commit_before_dispatch(self)
 
-    def complete_writes(self) -> tuple[PageRef, ...]:
+    def complete_writes(self) -> tuple[BlockRef, ...]:
         return self._manager._complete_writes(self)
 
     def rollback(self) -> None:
@@ -291,60 +232,67 @@ class KvPlanTxn:
         self._manager._fail(self)
 
 
-class KvPageManager:
-    """Owns request page tables and stages append work transactionally"""
+class BlockManager:
+    """Owns request blcok tables and stages append work transactionally."""
 
     def __init__(
         self,
         *,
-        page_size: int,
-        num_pages: int,
+        block_size: int,
+        num_blocks: int,
     ) -> None:
-        _check_positive_int("page_size", page_size)
+        _check_positive_int("block_size", block_size)
 
-        self.page_size = page_size
-        self.allocator = PageAllocator(num_pages=num_pages)
+        self.block_size = block_size
+        self.pool = BlockPool(num_blocks=num_blocks)
 
-        self._page_tables: dict[int, tuple[PageRef, ...]] = {}
+        self._block_tables: dict[int, tuple[BlockRef, ...]] = {}
         self._valid_token_counts: dict[int, int] = {}
-        self._open_txn: KvPlanTxn | None = None
+        self._open_txn: BlockPlanTxn | None = None
+        self._last_completed_txn: BlockPlanTxn | None = None
 
 
-    def page_table(
+    def block_table(
         self,
         request_id: int,
-    ) -> tuple[PageRef, ...]:
-        return self._page_tables.get(request_id, ())
+    ) -> tuple[BlockRef, ...]:
+        return self._block_tables.get(request_id, ())
 
 
     def valid_token_count(self, request_id: int) -> int:
         return self._valid_token_counts.get(request_id, 0)
 
+
     @property
-    def free_page_count(self) -> int:
-        return self.allocator.free_page_count
+    def free_block_count(self) -> int:
+        return self.pool.free_block_count
 
 
-    def required_new_pages(self, append: KvAppend) -> int:
-        """Return page growth for a validated append without mutation."""
-        table = self.page_table(append.request_id)
+    def required_new_blocks(self, append: BlockAppend) -> int:
+        """Validate an append and query its growth without changing ownership."""
+        if not isinstance(append, BlockAppend):
+            raise TypeError("appends must contain BlockAppend values.")
+        if append.token_start != self.valid_token_count(append.request_id):
+            raise ValueError("token_start does not match valid KV length")
+
+        table = self.block_table(append.request_id)
         token_end = append.token_start + append.query_len
-        new_page_count = (
-            self._pages_for_tokens(token_end) - len(table)
-        )
-        if new_page_count < 0:
+        count = self._blocks_for_tokens(token_end) - len(table)
+
+        if count < 0:
             raise RuntimeError(
-                "page table exceeds valid KV length"
+                "block table exceeds valid KV length"
             )
-        return new_page_count
+
+        return count
 
 
     def begin_plan(
         self,
         *,
         plan_id: int,
-        appends: tuple[KvAppend, ...],
-    ) -> KvPlanTxn | None:
+        appends: tuple[BlockAppend, ...],
+    ) -> BlockPlanTxn | None:
         """Stage request append intervals as one KV transaction."""
         _check_non_negative_int("plan_id", plan_id)
 
@@ -356,17 +304,14 @@ class KvPageManager:
             raise ValueError("KV plan must contain at least one append")
 
         staged: list[
-            tuple[int, int, tuple[PageRef, ...], int, int]
+            tuple[int, int, tuple[BlockRef, ...], int, int]
         ] = []
         seen_request_ids: set[int] = set()
-        total_new_pages = 0
+        total_new_blocks = 0
 
-        # Validate the complete batch before reserving any physical page.
+        # Validate the complete batch before reserving any physical block.
         for append in appends:
-            if not isinstance(append, KvAppend):
-                raise TypeError(
-                    "appends must contain KvAppend values"
-                )
+            new_block_count = self.required_new_blocks(append)
 
             request_id = append.request_id
             token_start = append.token_start
@@ -378,21 +323,8 @@ class KvPageManager:
                 )
             seen_request_ids.add(request_id)
 
-            valid_tokens = self.valid_token_count(request_id)
-            if token_start != valid_tokens:
-                raise ValueError(
-                    "token_start does not match valid KV length"
-                )
-
-            table = self.page_table(request_id)
+            table = self.block_table(request_id)
             token_end = token_start + query_len
-            required_pages = self._pages_for_tokens(token_end)
-            new_page_count = required_pages - len(table)
-
-            if new_page_count < 0:
-                raise RuntimeError(
-                    "page table exceeds valid KV length"
-                )
 
             staged.append(
                 (
@@ -400,53 +332,52 @@ class KvPageManager:
                     token_start,
                     table,
                     token_end,
-                    new_page_count,
+                    new_block_count,
                 )
             )
-            total_new_pages += new_page_count
+            total_new_blocks += new_block_count
 
         reservation = None
-        if total_new_pages:
-            reservation = self.allocator.reserve(
-                count=total_new_pages,
-                txn_id=plan_id,
+        if total_new_blocks:
+            reservation = self.pool.reserve(
+                count=total_new_blocks
             )
             if reservation is None:
                 return None
 
         reserved_refs = (
-            reservation.page_refs
+            reservation.block_refs
             if reservation is not None
             else ()
         )
 
         ref_offset = 0
-        page_tables: dict[int, tuple[PageRef, ...]] = {}
+        block_tables: dict[int, tuple[BlockRef, ...]] = {}
         slot_mappings: dict[int, tuple[int, ...]] = {}
         token_ends: dict[int, int] = {}
-        written_refs: list[PageRef] = []
+        written_refs: list[BlockRef] = []
 
         for (
             request_id,
             token_start,
             table,
             token_end,
-            new_page_count,
+            new_block_count,
         ) in staged:
             new_refs = reserved_refs[
-                ref_offset : ref_offset + new_page_count
+                ref_offset : ref_offset + new_block_count
             ]
-            ref_offset += new_page_count
+            ref_offset += new_block_count
 
             staged_table = table + new_refs
-            page_tables[request_id] = staged_table
+            block_tables[request_id] = staged_table
             token_ends[request_id] = token_end
 
-            first_page = token_start // self.page_size
-            last_page = (token_end - 1) // self.page_size
+            first_block = token_start // self.block_size
+            last_block = (token_end - 1) // self.block_size
 
             written_refs.extend(
-                staged_table[first_page : last_page + 1]
+                staged_table[first_block : last_block + 1]
             )
 
             slot_mappings[request_id] = tuple(
@@ -457,106 +388,103 @@ class KvPageManager:
                 for position in range(token_start, token_end)
             )
 
-        txn = KvPlanTxn(
+        txn = BlockPlanTxn(
             plan_id=plan_id,
             manager=self,
             reservation=reservation,
-            page_tables=page_tables,
+            block_tables=block_tables,
             slot_mappings=slot_mappings,
             token_ends=token_ends,
             written_refs=tuple(written_refs),
         )
 
         self._open_txn = txn
+        self._last_completed_txn = None
         return txn
 
 
     def release_request(self, request_id: int) -> None:
         if self._open_txn is not None:
             raise RuntimeError(
-                "cannot release pages during a KV transaction"
+                "cannot release blocks during a KV transaction"
             )
 
-        table = self._page_tables.pop(request_id, ())
+        table = self._block_tables.pop(request_id, ())
         self._valid_token_counts.pop(request_id, None)
 
         for ref in reversed(table):
-            self.allocator.release(ref)
+            self.pool.release(ref)
 
 
-    def teardown(self, txn: KvPlanTxn | None = None) -> None:
-        """Release all KV ownership after an unrecoverable execution error."""
-        if txn is not None and self._open_txn not in (None, txn):
-            raise ValueError("a different KV transaction is open")
+    def teardown(self, txn: BlockPlanTxn | None = None) -> None:
+        """Discard all ownership on fail-stop; never resotre partially written KV."""
+        current = self._open_txn or self._last_completed_txn
+        if txn is not None and (
+            txn._manager is not self or txn is not current
+        ):
+            raise ValueError("transaction is not the manager's current step")
 
-        if self._open_txn is not None:
-            open_txn = self._open_txn
-            if open_txn._state is KvTxnState.PREPARED:
+        open_txn = self._open_txn
+        if open_txn is not None:
+            if open_txn.state is BlockTxnState.PREPARED:
                 if open_txn._reservation is not None:
-                    self.allocator.rollback(open_txn._reservation)
-            elif open_txn._state is KvTxnState.DISPATCHED:
-                open_txn._state = KvTxnState.FAILED
+                    self.pool.rollback(open_txn._reservation)
+            # Close metadata even when teardown() receives no explicit txn.
+            open_txn._state = BlockTxnState.FAILED
             self._open_txn = None
 
-        seen: set[tuple[int, int]] = set()
-        for table in tuple(self._page_tables.values()):
-            for ref in table:
-                key = (ref.page_id, ref.generation)
-                if key in seen:
-                    continue
-                seen.add(key)
-                if self.allocator.page_state(ref) is PageState.PRIVATE_MUTABLE:
-                    self.allocator.release(ref)
-
-        self._page_tables.clear()
-        self._valid_token_counts.clear()
+        # Blocks are private to requests: no sharing or duplicate ownership.
+        for request_id in tuple(self._block_tables):
+            self.release_request(request_id)
+        self._last_completed_txn = None
         if txn is not None:
-            txn._state = KvTxnState.FAILED
+            txn._state = BlockTxnState.FAILED
 
 
-    def _commit_before_dispatch(self, txn: KvPlanTxn) -> None:
-        self._require_open(txn, KvTxnState.PREPARED)
+    def _commit_before_dispatch(self, txn: BlockPlanTxn) -> None:
+        self._require_open(txn, BlockTxnState.PREPARED)
 
         if txn._reservation is not None:
-            self.allocator.commit(txn._reservation)
+            self.pool.commit(txn._reservation)
 
-        self._page_tables.update(txn._page_tables)
-        txn._state = KvTxnState.DISPATCHED
+        self._block_tables.update(txn._block_tables)
+        txn._state = BlockTxnState.DISPATCHED
 
 
     def _complete_writes(
         self,
-        txn: KvPlanTxn,
-    ) -> tuple[PageRef, ...]:
-        self._require_open(txn, KvTxnState.DISPATCHED)
+        txn: BlockPlanTxn,
+    ) -> tuple[BlockRef, ...]:
+        self._require_open(txn, BlockTxnState.DISPATCHED)
 
         self._valid_token_counts.update(txn._token_ends)
-        txn._state = KvTxnState.COMMITTED
+        txn._state = BlockTxnState.COMMITTED
         self._open_txn = None
+        self._last_completed_txn = txn
 
         return txn._written_refs
 
 
-    def _rollback(self, txn: KvPlanTxn) -> None:
-        self._require_open(txn, KvTxnState.PREPARED)
+    def _rollback(self, txn: BlockPlanTxn) -> None:
+        self._require_open(txn, BlockTxnState.PREPARED)
 
         if txn._reservation is not None:
-            self.allocator.rollback(txn._reservation)
+            self.pool.rollback(txn._reservation)
 
-        txn._state = KvTxnState.ROLLED_BACK
+        txn._state = BlockTxnState.ROLLED_BACK
         self._open_txn = None
 
 
-    def _fail(self, txn: KvPlanTxn) -> None:
-        if txn.state not in (KvTxnState.DISPATCHED, KvTxnState.COMMITTED):
+    def _fail(self, txn: BlockPlanTxn) -> None:
+        if txn.state not in (BlockTxnState.DISPATCHED, BlockTxnState.COMMITTED):
             raise ValueError("KV transaction must be dispatched or committed")
         self.teardown(txn)
 
 
     def _require_open(
         self,
-        txn: KvPlanTxn,
-        expected_state: KvTxnState,
+        txn: BlockPlanTxn,
+        expected_state: BlockTxnState,
     ) -> None:
         if (
             self._open_txn is not txn
@@ -567,25 +495,25 @@ class KvPageManager:
             )
 
 
-    def _pages_for_tokens(self, token_count: int) -> int:
+    def _blocks_for_tokens(self, token_count: int) -> int:
         return (
-            token_count + self.page_size - 1
-        ) // self.page_size
+            token_count + self.block_size - 1
+        ) // self.block_size
 
 
     def _slot_for_position(
         self,
-        table: tuple[PageRef, ...],
+        table: tuple[BlockRef, ...],
         position: int,
     ) -> int:
         # Canonical linear CPU slot. The backend may lower this
         # into its private tensor layout later.
-        logical_page, offset = divmod(
+        logical_block, offset = divmod(
             position,
-            self.page_size,
+            self.block_size,
         )
         return (
-            table[logical_page].page_id
-            * self.page_size
+            table[logical_block].block_id
+            * self.block_size
             + offset
         )
