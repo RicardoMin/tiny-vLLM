@@ -90,9 +90,6 @@ class RequestState:
     first_token_ns: int | None = None
     finished_ns: int | None = None
 
-    preemption_count: int = 0
-    recomputed_tokens: int = 0
-
     def __post_init__(self) -> None:
         self.prompt_token_ids = list(self.prompt_token_ids)
         self.output_token_ids = list(self.output_token_ids)

@@ -16,7 +16,8 @@ def _commit(manager, plan_id, *appends):
     txn = manager.begin_plan(plan_id=plan_id, appends=appends)
     assert txn is not None
     txn.commit_before_dispatch()
-    return txn, txn.complete_writes()
+    txn.complete_writes()
+    return txn
 
 
 def _assert_metadata_closed(txn, request_id):
@@ -108,7 +109,7 @@ def test_mixed_append_isolated_tables_slots_and_write_progress():
     assert manager.block_table(10) == first
     assert manager.block_table(11) == second
     assert (manager.valid_token_count(10), manager.valid_token_count(11)) == (6, 0)
-    assert set(txn.complete_writes()) == {first[1], first[2], second[0]}
+    txn.complete_writes()
     assert (manager.valid_token_count(10), manager.valid_token_count(11)) == (9, 2)
     _assert_metadata_closed(txn, 10)
     with pytest.raises(ValueError):
@@ -204,7 +205,7 @@ def test_teardown_closes_open_transaction_and_releases_all(dispatched):
 
 def test_latest_completed_transaction_can_fail_after_capacity_rejection():
     manager = BlockManager(block_size=4, num_blocks=1)
-    latest, _ = _commit(manager, 1, BlockAppend(10, 0, 4))
+    latest = _commit(manager, 1, BlockAppend(10, 0, 4))
     assert manager.begin_plan(plan_id=2, appends=(BlockAppend(11, 0, 1),)) is None
     latest.fail()
     assert latest.state is BlockTxnState.FAILED
@@ -215,7 +216,7 @@ def test_latest_completed_transaction_can_fail_after_capacity_rejection():
 @pytest.mark.parametrize("finish_new", ["open", "complete", "rollback"])
 def test_old_and_foreign_transactions_cannot_teardown_current_state(finish_new):
     manager = BlockManager(block_size=4, num_blocks=3)
-    old, _ = _commit(manager, 1, BlockAppend(10, 0, 1))
+    old = _commit(manager, 1, BlockAppend(10, 0, 1))
     newer = manager.begin_plan(plan_id=2, appends=(BlockAppend(11, 0, 1),))
     if finish_new == "complete":
         newer.commit_before_dispatch()
@@ -223,7 +224,7 @@ def test_old_and_foreign_transactions_cannot_teardown_current_state(finish_new):
     elif finish_new == "rollback":
         newer.rollback()
     other = BlockManager(block_size=4, num_blocks=1)
-    foreign, _ = _commit(other, 1, BlockAppend(12, 0, 1))
+    foreign = _commit(other, 1, BlockAppend(12, 0, 1))
     before = manager.pool.snapshot(), manager.block_table(10), manager.block_table(11)
     for invalid in (old, foreign):
         with pytest.raises(ValueError):

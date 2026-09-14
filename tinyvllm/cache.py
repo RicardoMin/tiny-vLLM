@@ -166,7 +166,6 @@ class BlockPlanTxn:
         "_block_tables",
         "_slot_mappings",
         "_token_ends",
-        "_written_refs",
     )
 
     def __init__(
@@ -178,7 +177,6 @@ class BlockPlanTxn:
         block_tables: dict[int, tuple[BlockRef, ...]],
         slot_mappings: dict[int, tuple[int, ...]],
         token_ends: dict[int, int],
-        written_refs: tuple[BlockRef, ...],
     ) -> None:
         self._plan_id = plan_id
         self._state = BlockTxnState.PREPARED
@@ -187,7 +185,6 @@ class BlockPlanTxn:
         self._block_tables = block_tables
         self._slot_mappings = slot_mappings
         self._token_ends = token_ends
-        self._written_refs = written_refs
 
 
     @property
@@ -222,7 +219,7 @@ class BlockPlanTxn:
     def commit_before_dispatch(self) -> None:
         self._manager._commit_before_dispatch(self)
 
-    def complete_writes(self) -> tuple[BlockRef, ...]:
+    def complete_writes(self) -> None:
         return self._manager._complete_writes(self)
 
     def rollback(self) -> None:
@@ -233,7 +230,7 @@ class BlockPlanTxn:
 
 
 class BlockManager:
-    """Owns request blcok tables and stages append work transactionally."""
+    """Owns request block tables and stages append work transactionally."""
 
     def __init__(
         self,
@@ -355,7 +352,6 @@ class BlockManager:
         block_tables: dict[int, tuple[BlockRef, ...]] = {}
         slot_mappings: dict[int, tuple[int, ...]] = {}
         token_ends: dict[int, int] = {}
-        written_refs: list[BlockRef] = []
 
         for (
             request_id,
@@ -373,13 +369,6 @@ class BlockManager:
             block_tables[request_id] = staged_table
             token_ends[request_id] = token_end
 
-            first_block = token_start // self.block_size
-            last_block = (token_end - 1) // self.block_size
-
-            written_refs.extend(
-                staged_table[first_block : last_block + 1]
-            )
-
             slot_mappings[request_id] = tuple(
                 self._slot_for_position(
                     staged_table,
@@ -395,7 +384,6 @@ class BlockManager:
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             token_ends=token_ends,
-            written_refs=tuple(written_refs),
         )
 
         self._open_txn = txn
@@ -417,7 +405,7 @@ class BlockManager:
 
 
     def teardown(self, txn: BlockPlanTxn | None = None) -> None:
-        """Discard all ownership on fail-stop; never resotre partially written KV."""
+        """Discard all ownership on fail-stop; never restore partially written KV."""
         current = self._open_txn or self._last_completed_txn
         if txn is not None and (
             txn._manager is not self or txn is not current
@@ -454,15 +442,13 @@ class BlockManager:
     def _complete_writes(
         self,
         txn: BlockPlanTxn,
-    ) -> tuple[BlockRef, ...]:
+    ) -> None:
         self._require_open(txn, BlockTxnState.DISPATCHED)
 
         self._valid_token_counts.update(txn._token_ends)
         txn._state = BlockTxnState.COMMITTED
         self._open_txn = None
         self._last_completed_txn = txn
-
-        return txn._written_refs
 
 
     def _rollback(self, txn: BlockPlanTxn) -> None:

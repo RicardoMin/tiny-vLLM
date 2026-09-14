@@ -1,6 +1,6 @@
 # tiny-vLLM 项目入口与协作约定
 
-更新：2026-09-13。以同目录 TINY_VLLM_V1_REFACTOR_PLAN.md 为唯一有效路线。
+更新：2026-09-14。以同目录 TINY_VLLM_V1_REFACTOR_PLAN.md 为唯一有效路线。
 
 ## 目标与实际状态
 
@@ -9,11 +9,11 @@
 目前没有完成同条件性能比较的证据。不得擅自将目标改成单项快 10%，也不预先接受
 代码量为 nano-vLLM 的 2–2.5 倍；按统一范围统计并解释复杂度增量。
 
-- 用户源码：WSL `/home/ricardo/project/tiny-vllm`，本轮教程起点 `7185079`。
+- 用户源码：WSL `/home/ricardo/project/tiny-vllm`，本轮整理教程起点 `0b89ba8`，P0 已提交。
 - 助手工作区：WSL `/home/ricardo/project/tiny-vllm-codex`，main。
-- 本轮实现位于助手 `cb16aaa` 后的工作树，未替用户提交。
+- 本轮实现位于助手 `cb16aaa` 后的工作树，按用户 `0b89ba8` 重新对齐，未替用户提交。
 - 模型：`/home/ricardo/models/Qwen3/Qwen3-0.6B`；权重不进 Git。
-- 本轮助手 P0 验证：全量 159 passed；用户源码实施进度须单独核查。
+- 用户 P0 源码验证：159 passed；助手仓库整理后：184 passed。测试同步不代表用户实施完成。
 
 基线已有 Engine 生命周期、连续调度、chunked prefill、混合计划、sampling、KV 事务、
 Qwen3 权重加载和 flat batch ModelRunner。Transformer 每 batch 调用一次，reference
@@ -26,6 +26,7 @@ PagedKVCache 已有物理存储原型；cuda 拼写、反向范围和 slot 越�
 - [TINY_VLLM_V1_REFACTOR_PLAN.md](TINY_VLLM_V1_REFACTOR_PLAN.md)：有效路线、职责与验收。
 - [TINY_VLLM_ARCHITECTURE_REVIEW.md](TINY_VLLM_ARCHITECTURE_REVIEW.md)：理由、已知限制和待解决接线问题。
 - [MODULE_P0_BLOCK_POOL.md](MODULE_P0_BLOCK_POOL.md)：本轮模块契约与验证记录。
+- [MODULE_REPO_CLEANUP.md](MODULE_REPO_CLEANUP.md)：P0 后全仓复查、整理教程与数值验证边界。
 
 ## 协作规则
 

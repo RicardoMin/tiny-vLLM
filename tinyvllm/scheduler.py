@@ -168,7 +168,7 @@ class Scheduler:
             num_blocks=kv_num_blocks,
         )
 
-        self._eos_token_ids = _normalize_token_ids("eos_token_ids", eos_token_ids) if eos_token_ids is not None else set()
+        self._eos_token_ids = _normalize_token_ids("eos_token_ids", eos_token_ids)
 
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
@@ -699,7 +699,7 @@ class Scheduler:
                 if (
                     stop_on_eos
                     or request.remaining_new_tokens == 0
-                    or request.computed_tokens >= self.max_model_len
+                    or request.total_tokens >= self.max_model_len
                 ):
                     self._finish_request(
                         request,
@@ -726,18 +726,26 @@ class Scheduler:
 
     def fail_step(self, txn: ScheduleTxn) -> None:
         self._require_open_txn(txn, TxnState.DISPATCHED)
-        txn.kv.fail()
-        object.__setattr__(txn, "state", TxnState.FAILED)
-        for item in txn.plan.items:
-            request = self._requests.get(item.request_id)
-            if request is not None:
-                request.inflight_plan_id = None
+        self.shutdown()
+
+
+    def shutdown(self) -> None:
+        """Permanently stop scheduling and dicard all KV ownership."""
+        self._failed = True
+        txn = self._open_txn
+        self._block_manager.teardown(None if txn is None else txn.kv)
+        if txn is not None:
+            object.__setattr__(txn, "state", TxnState.FAILED)
+        for request in self._requests.values():
+            request.inflight_plan_id = None
+            request.active_slot = None
+        self._pending_arrivals.clear()
         self._waiting_ids.clear()
         self._prefill_ids.clear()
         self._decode_ids.clear()
         self._slot_request_ids[:] = [None] * self.max_active_requests
         self._open_txn = None
-        self._failed = True
+        self._command_cutoff_ready = False
 
 
     def _ensure_healthy(self) -> None:

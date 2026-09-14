@@ -297,3 +297,175 @@ def test_ignore_eos_applies_to_all_eos_ids() -> None:
     assert first.completion_events == ()
     assert second.completion_events[0].request_id == request_id
     assert second.completion_events[0].output_token_ids == (8, 8)
+
+@pytest.mark.parametrize(
+    "prompt, kwargs, error",
+    [
+        ((), {}, ValueError),
+        ((-1,), {}, ValueError),
+        ((True,), {}, TypeError),
+        ((1,) * 17, {}, ValueError),
+        ((1,), {"arrival_ns": -1}, ValueError),
+        ((1,), {"request_id": -1}, ValueError),
+    ],
+)
+def test_invalid_submission_does_not_poison_queue_or_consume_id(prompt, kwargs, error):
+    engine = make_engine()
+    with pytest.raises(error):
+        engine.submit(prompt, SamplingParams(max_new_tokens=1), **kwargs)
+    assert not engine.has_unfinished()
+    request_id = engine.submit((1,), SamplingParams(max_new_tokens=1))
+    assert request_id == 0
+    event, = engine.step(now_ns=0).completion_events
+    assert event.request_id == 0
+    assert event.submit_seq == 0
+    assert event.output_token_ids == (7,)
+
+
+@pytest.mark.parametrize("prompt_len", [1, 15, 16])
+def test_generation_stays_within_total_model_length(prompt_len):
+    engine = make_engine()
+    output, = engine.generate((GenerateRequest(
+        prompt_token_ids=(1,) * prompt_len,
+        sampling=SamplingParams(max_new_tokens=32),
+    ),))
+    assert output.prompt_token_count + len(output.output_token_ids) == 16
+    assert len(output.output_token_ids) == 16 - prompt_len
+    assert not engine.has_unfinished()
+
+
+def test_completion_cannot_be_cancelled_and_id_cannot_be_reused():
+    engine = make_engine()
+    request_id = engine.submit((1,), SamplingParams(max_new_tokens=1))
+    engine.step(now_ns=0)
+    assert not engine.cancel(request_id)
+    with pytest.raises(ValueError, match="duplicate"):
+        engine.submit((1,), SamplingParams(), request_id=request_id)
+
+
+def test_default_eos_policy_is_immutable():
+    engine = make_engine()
+    assert engine.scheduler.eos_token_ids == frozenset()
+    assert isinstance(engine.scheduler.eos_token_ids, frozenset)
+
+
+@pytest.mark.parametrize("point", ["before_dispatch", "after_kv_dispatch", "after_kv_complete", "release_idle", "release_active", "done_clock"])
+def test_all_irrecoverable_step_failures_close_ownership(point, monkeypatch):
+    class Executor:
+        capabilities = CpuFakeExecutor.capabilities
+        def __init__(self):
+            self.cleared = False
+        def execute(self, batch):
+            return CpuFakeExecutor(token_id=7).execute(batch)
+        def release(self, request_id):
+            if point.startswith("release_"):
+                raise RuntimeError("injected failure")
+        def clear(self):
+            self.cleared = True
+
+    from tinyvllm.cache import BlockPlanTxn, BlockTxnState
+    from tinyvllm.scheduler import TxnState
+
+    executor = Executor()
+    engine = make_engine(executor=executor)
+    engine.submit((1,), SamplingParams(max_new_tokens=8), request_id=1)
+    if point.startswith("release_"):
+        engine.step(now_ns=0)
+        if point == "release_idle":
+            engine.cancel(1)
+        else:
+            engine.submit((2,), SamplingParams(max_new_tokens=0), request_id=2)
+
+    captured = []
+    original_begin = engine.scheduler.begin_step
+    def begin(now_ns):
+        txn = original_begin(now_ns)
+        if txn is not None:
+            captured.append(txn)
+        return txn
+    monkeypatch.setattr(engine.scheduler, "begin_step", begin)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected failure")
+
+    if point == "before_dispatch":
+        monkeypatch.setattr(engine.scheduler, "mark_dispatched", fail)
+    elif point in ("after_kv_dispatch", "after_kv_complete"):
+        name = "commit_before_dispatch" if point == "after_kv_dispatch" else "complete_writes"
+        original = getattr(BlockPlanTxn, name)
+        def fail_after(txn):
+            original(txn)
+            fail()
+        monkeypatch.setattr(BlockPlanTxn, name, fail_after)
+    elif point == "done_clock":
+        calls = 0
+        def clock():
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                fail()
+            return 0
+        engine._clock = clock
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        engine.step(now_ns=None if point == "done_clock" else 1)
+    assert executor.cleared
+    assert not engine.scheduler.has_open_transaction
+    manager = engine.scheduler.block_manager
+    assert manager.free_block_count == manager.pool.num_blocks
+    assert manager.pool.open_reservation_count == 0
+    for request_id in engine.scheduler.request_ids:
+        request = engine.scheduler.get_request(request_id)
+        assert request.active_slot is None
+        assert request.inflight_plan_id is None
+        assert manager.block_table(request_id) == ()
+    for txn in captured:
+        if txn.state is not TxnState.COMMITTED:
+            assert txn.state is TxnState.FAILED
+            assert txn.kv.state is BlockTxnState.FAILED
+    with pytest.raises(RuntimeError, match="engine is failed"):
+        engine.step(now_ns=2)
+    with pytest.raises(RuntimeError, match="scheduler is failed"):
+        engine.scheduler.apply_commands((), now_ns=2)
+
+
+def test_dispatch_clock_failure_rolls_back_and_can_retry():
+    engine = make_engine()
+    engine.submit((1,), SamplingParams(max_new_tokens=1))
+    calls = 0
+    def clock():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("clock failed before dispatch")
+        return 0
+    engine._clock = clock
+    with pytest.raises(RuntimeError, match="clock failed before dispatch"):
+        engine.step()
+    assert not engine.scheduler.has_open_transaction
+    manager = engine.scheduler.block_manager
+    assert manager.free_block_count == manager.pool.num_blocks
+    assert engine.step(now_ns=1).completion_events[0].output_token_ids == (7,)
+
+
+def test_cleanup_error_preserves_original_failure_and_clears_executor(monkeypatch):
+    class Executor:
+        capabilities = CpuFakeExecutor.capabilities
+        cleared = False
+        def execute(self, batch):
+            raise ValueError("original execution failure")
+        def clear(self):
+            self.cleared = True
+    executor = Executor()
+    engine = make_engine(executor=executor)
+    engine.submit((1,), SamplingParams(max_new_tokens=1))
+    def fail_cleanup(*args):
+        raise RuntimeError("secondary cleanup failure")
+    monkeypatch.setattr(engine.scheduler, "shutdown", fail_cleanup, raising=False)
+    with pytest.raises(RuntimeError, match="executor failed") as caught:
+        engine.step(now_ns=0)
+    assert str(caught.value.__cause__) == "original execution failure"
+    assert executor.cleared
+    assert any("secondary cleanup failure" in note for note in caught.value.__cause__.__notes__)
+    with pytest.raises(RuntimeError, match="engine is failed"):
+        engine.submit((1,), SamplingParams())

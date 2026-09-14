@@ -156,7 +156,7 @@ def validate(manifest_path: Path) -> dict:
         )
         check(
             type(record["arrival_ns"]) is int
-            and record["arrival_ns"] >= previous_arrival,
+            and record["arrival_ns"] >= max(0, previous_arrival),
             f"record {ordinal}: invalid arrival",
         )
         check(

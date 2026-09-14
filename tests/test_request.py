@@ -80,17 +80,11 @@ def test_steady_decode() -> None:
     assert request.token_slice(3, 4) == [42]
 
 
-def test_recompute_preemption() -> None:
+def test_token_slice_crosses_prompt_output_boundary() -> None:
     request = make_request()
-    request.status = RequestStatus.WAITING
-    request.admitted_ns = 110
-    request.output_token_ids.append(42)
-    request.first_token_ns = 120
-    request.preemption_count = 1
-
-    assert request.computed_tokens == 0
-    assert request.work_class is WorkClass.PREFILL
-    assert request.context_token_ids == [11, 12, 13, 42]
+    request.output_token_ids.extend([42, 43])
+    assert request.token_slice(2, 4) == [13, 42]
+    assert request.token_slice(3, 5) == [42, 43]
 
 
 def test_future_request_can_be_aborted_before_arrival() -> None:

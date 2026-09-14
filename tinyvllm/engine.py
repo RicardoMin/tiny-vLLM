@@ -5,7 +5,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from tinyvllm._validation import _check_non_negative_int
+from tinyvllm._validation import (
+    _check_non_negative_int,
+    _check_token_id
+)
 from tinyvllm.batch import (
     BatchBuilder,
     PreparedBatch,
@@ -139,7 +142,6 @@ class Engine:
         self._next_request_id = 0
 
         self._submitted_ids: set[int] = set()
-        self._terminal_ids: set[int] = set()
         self._cancel_queued: set[int] = set()
         self._failed: BaseException | None = None
 
@@ -159,22 +161,13 @@ class Engine:
                 "sampling must be SamplingParams"
             )
 
-        if request_id is None:
-            while self._next_request_id in self._submitted_ids:
-                self._next_request_id += 1
-
-            request_id = self._next_request_id
-            self._next_request_id += 1
-        else:
-            _check_non_negative_int(
-                "request_id",
-                request_id,
-            )
-
-            if request_id in self._submitted_ids:
-                raise ValueError(
-                    f"duplicate request_id: {request_id}"
-                )
+        prompt_token_ids = tuple(prompt_token_ids)
+        if not prompt_token_ids:
+            raise ValueError("prompt_token_ids must be non-empty")
+        if len(prompt_token_ids) > self.scheduler.max_model_len:
+            raise ValueError("prompt exceeds max_model_len")
+        for token_id in prompt_token_ids:
+            _check_token_id(token_id)
 
         if arrival_ns is None:
             arrival_ns = self._clock()
@@ -184,18 +177,29 @@ class Engine:
             arrival_ns,
         )
 
-        self._commands.append(
-            AddCommand(
+        automatic_id = request_id is None
+        if automatic_id:
+            request_id = self._next_request_id
+            while request_id in self._submitted_ids:
+                request_id += 1
+        else:
+            _check_non_negative_int("request_id", request_id)
+            if request_id in self._submitted_ids:
+                raise ValueError(f"duplicate request_id: {request_id}")
+
+        command = AddCommand(
                 seq=self._next_seq,
                 request_id=request_id,
-                prompt_token_ids=tuple(prompt_token_ids),
+                prompt_token_ids=prompt_token_ids,
                 sampling=sampling,
                 arrival_ns=arrival_ns,
-            )
         )
-
-        self._next_seq += 1
+        # Publish only after all ordinary input validation succeeds.
+        self._commands.append(command)
         self._submitted_ids.add(request_id)
+        self._next_seq += 1
+        if automatic_id:
+            self._next_request_id = request_id + 1
         return request_id
 
 
@@ -207,9 +211,6 @@ class Engine:
         )
 
         if request_id not in self._submitted_ids:
-            return False
-
-        if request_id in self._terminal_ids:
             return False
 
         if request_id in self._cancel_queued:
@@ -284,7 +285,11 @@ class Engine:
                 raise SchedulerResourceError(
                     self.scheduler.blocked_reason
                 )
-            return self._collect_events(None)
+            try:
+                return self._collect_events(None)
+            except BaseException as exc:
+                self._fail_stop(exc)
+                raise
 
         try:
             requests = tuple(
@@ -298,29 +303,16 @@ class Engine:
                 requests,
                 kv=txn.kv,
             )
-        except BaseException:
-            self.scheduler.rollback(txn)
-            raise
-
-        try:
             self.executor.capabilities.validate(batch)
+            dispatch_ns = start_ns
+            if not explicit_time:
+                dispatch_ns = max(dispatch_ns, self._clock())
         except BaseException:
             self.scheduler.rollback(txn)
             raise
 
-        dispatch_ns = start_ns
-
-        if not explicit_time:
-            dispatch_ns = max(
-                dispatch_ns,
-                self._clock(),
-            )
-
         try:
-            self.scheduler.mark_dispatched(
-                txn,
-                dispatch_ns,
-            )
+            self.scheduler.mark_dispatched(txn, dispatch_ns)
         except BaseException as exc:
             self._fail_stop(exc)
             raise
@@ -328,32 +320,18 @@ class Engine:
         try:
             result = self.executor.execute(batch)
         except BaseException as exc:
-            self._fail_stop(exc, txn)
-            raise RuntimeError(
-                "executor failed; engine is failed"
-            ) from exc
-
-        done_ns = dispatch_ns
-
-        if not explicit_time:
-            done_ns = max(done_ns, self._clock())
+            self._fail_stop(exc)
+            raise RuntimeError("executor failed; engine is failed") from exc
 
         try:
-            self.scheduler.commit_step(
-                txn,
-                result,
-                done_ns,
-            )
-        except BaseException as exc:
-            self._fail_stop(exc, txn)
-            raise
-
-        try:
+            done_ns = dispatch_ns
+            if not explicit_time:
+                done_ns = max(done_ns, self._clock())
+            self.scheduler.commit_step(txn, result, done_ns)
             return self._collect_events(result)
         except BaseException as exc:
             self._fail_stop(exc)
             raise
-
 
     def has_unfinished(self) -> bool:
         return bool(
@@ -417,9 +395,6 @@ class Engine:
             self.executor.release(
                 event.request_id
             )
-            self._terminal_ids.add(
-                event.request_id
-            )
 
         if result is None:
             return EngineStepEvents(
@@ -460,14 +435,14 @@ class Engine:
     def _fail_stop(
         self,
         cause: BaseException,
-        txn=None,
     ) -> None:
-        if txn is not None and self.scheduler.has_open_transaction:
-            self.scheduler.fail_step(txn)
-
-        try:
-            self.executor.clear()
-        except BaseException:
-            pass
-
+        # Even a cleanup failure must leave the engine permanently failed.
         self._failed = cause
+        for name, cleanup in (
+            ("scheduler", self.scheduler.shutdown),
+            ("executor", self.executor.clear),
+        ):
+            try:
+                cleanup()
+            except BaseException as cleanup_error:
+                cause.add_note(f"{name} cleanup failed: {cleanup_error!r}")

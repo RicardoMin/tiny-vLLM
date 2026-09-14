@@ -208,3 +208,27 @@ def test_qwen3_matches_hf_with_incremental_cache(
 
         cache.clear()
         assert cache.length == 0
+
+@pytest.mark.parametrize("name", [
+    "model.embed_tokens.weight",
+    "model.norm.weight",
+    "model.layers.0.self_attn.o_proj.weight",
+    "lm_head.weight",
+])
+def test_rejects_broadcastable_weight_shape_before_copy(name):
+    config = Qwen3Config.from_hf(HfQwen3Config(
+        vocab_size=41, hidden_size=24, intermediate_size=48,
+        num_hidden_layers=1, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=6,
+        max_position_embeddings=32, tie_word_embeddings=True,
+    ))
+    model = Qwen3ForCausalLM(config)
+    target = model.get_parameter(name)
+    before = target.detach().clone()
+    malformed = torch.zeros((1,) + tuple(target.shape[1:]))
+    with pytest.raises(ValueError, match="shape"):
+        model.load_weight(name, malformed)
+    torch.testing.assert_close(target, before)
+    correct = torch.ones_like(target, dtype=torch.float64)
+    model.load_weight(name, correct)
+    torch.testing.assert_close(target, correct.to(target.dtype))

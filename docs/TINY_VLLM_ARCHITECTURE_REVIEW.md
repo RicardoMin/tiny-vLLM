@@ -1,6 +1,6 @@
 # tiny-vLLM 架构复查
 
-更新：2026-09-13；依据用户 7185079、助手 cb16aaa 及本轮 P0 工作树。
+更新：2026-09-14；P0 历史复查如下，最新全仓整理依据用户 0b89ba8，见 MODULE_REPO_CLEANUP.md。
 有效路线见 [TINY_VLLM_V1_REFACTOR_PLAN.md](TINY_VLLM_V1_REFACTOR_PLAN.md)。
 
 ## 保留与纠正
@@ -44,3 +44,24 @@ metadata 边界验证，再明确 reference/debug 与设备热路径的检查职
 
 保留用户全面性能改进目标，固定 nano checkout 和协议，报告各负载结果及代码增量。
 消除重复生产路径；不为目录整齐造 wrapper，不用缩排版或删除必要测试冒充精简。
+
+## 2026-09-14 全仓整理结论
+
+原源码全量 159 passed，但新增案例暴露了 Engine.submit 非法输入污染命令队列、
+总序列长度多生成一个 token、失败清理漏掉 PREPARED/完成事件/时钟异常、Qwen3
+非 packed 权重广播复制，以及默认 EOS 集合可变、基准工具接受 arrival_ns=-1。
+修复和精简在助手工作区完成，184 passed；源码由用户按窗口教程实施。
+
+删除 BlockPlanTxn._written_refs：Scheduler 忽略 complete_writes 的返回值，物理存储
+写入由 slots 表示，不需要每步再保存一份写块列表。complete_writes 只提交有效 KV 长度。
+保留 _last_completed_txn：Scheduler 在 KV complete 后仍可能失败，需要当前事务身份校验。
+Engine 删除 _terminal_ids；cancel 已能根据待提交命令与 Scheduler 中的请求是否存在/
+是否终态决定结果。_submitted_ids 暂留以禁止重复 ID，仍随历史请求数增长；未来若要
+支持无限服务生命周期，应明确 ID 复用协议再处理，而非直接删去去重语义。
+
+真实 Qwen3-0.6B / RTX 5060 Laptop / BF16 / 两请求 prefill 的 HF 对照 greedy 一致，
+但 logits 最大绝对差 0.1796875、平均绝对差约 0.03138884，atol=0.15、rtol=0.02
+检查未通过。保留此发现，P1 需要独立数值归因和验收；不据此推断分页或性能结论。
+相同真实权重样例下，本轮修改前后 logits 逐元素完全一致；HF 差异在用户原提交已存在。
+当前可见开销还包括未使用 metadata 的设备张量构造、逐请求 SDPA 与 sampler、逐层
+KV 范围校验同步。这些需跟随 P1 接线和 P2 profile 分别处理，避免再造临时旁路。

@@ -803,7 +803,7 @@ class Qwen3ForCausalLM(nn.Module):
             )
 
         return routes
-    
+
 
     def load_weight(
         self,
@@ -820,10 +820,14 @@ class Qwen3ForCausalLM(nn.Module):
             ) from exc
 
         if shard is None:
+            target = self.get_parameter(target_name)
+            if tensor.shape != target.shape:
+                raise ValueError(
+                    f"{source_name}: expected shape {tuple(target.shape)},"
+                    f"got {tuple(tensor)}"
+                )
             with torch.no_grad():
-                self.get_parameter(
-                    target_name
-                ).copy_(tensor)
+                target.copy_(tensor)
         else:
             self.get_submodule(
                 target_name

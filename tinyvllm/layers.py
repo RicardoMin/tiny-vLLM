@@ -51,7 +51,7 @@ class PackedLinear(nn.Module):
 
         self.shard_names = shard_names
         self._name_to_index = {
-            name: index 
+            name: index
             for index, name in enumerate(shard_names)
         }
 

@@ -1,6 +1,6 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-13；用户基线 7185079，本轮 P0 重设计。
+更新：2026-09-14；用户 P0 已提交 0b89ba8，当前先完成仓库整理，再进入 P1。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -38,6 +38,11 @@ rollback、执行后 fail-stop、过期事务拒绝及完成/取消回收。本�
 
 ## P1：分页 reference 接线与生产路径收敛
 
+进入 P1 前先完成 MODULE_REPO_CLEANUP.md：submit 入队前验证、总序列长度限制、
+Scheduler.shutdown 统一 fail-stop 清理、权重 shape 校验，以及删除无消费者的写块列表。
+max_model_len 限制 prompt + output 总长度；KV valid length 仅统计已执行 token。
+shutdown 是永久失败清理，不是恢复调度；不撤销已经完成步骤的语义。
+
 1. Runner 创建全局 PagedKVCache，与 BlockManager 使用相同容量和 block_size。
 2. CPU batch 边界检查 block 范围、slots 与表一致性及写入 slots 唯一性。
 3. 明确 dtype：reference index_copy/index_select 使用 int64；优化 kernel 可使用其
@@ -45,6 +50,9 @@ rollback、执行后 fail-stop、过期事务拒绝及完成/取消回收。本�
 4. 每层按 slots 写 K/V，按 block table 读取历史。reference 可先 gather 后 SDPA，
    chunked prefill 的 causal mask 必须带历史位置偏移。
 5. 独立小模型/连续张量 oracle 对照 hidden、selected logits、每层逻辑 K/V。
+   固定随机种子和独立数值基线，加入真实 Qwen3 BF16 多步验证；先记录原实现误差，
+   区分模型算子精度差异与分页改动误差。2026-09-14 的真实权重 BF16 HF 对照在
+   atol=0.15、rtol=0.02 下未全量通过，不得声称该精度验收已完成。
 6. 同模块验收通过后删除 ContiguousKVCache 生产引用、cache= 分支、executor _caches
    兼容属性及旧测试；oracle 留在测试侧，不依赖另一份生产 executor。
 
