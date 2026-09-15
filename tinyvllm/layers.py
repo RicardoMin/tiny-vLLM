@@ -151,12 +151,10 @@ class RMSNorm(nn.Module):
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.rms_norm(
-            x,
-            self.weight.shape,
-            self.weight,
-            self.eps,
-        )
+        values = x.float()
+        variance = values.square().mean(dim=-1, keepdim=True)
+        normalized = values * torch.rsqrt(variance + self.eps)
+        return self.weight * normalized.to(x.dtype)
 
 
 class RotaryEmbedding(nn.Module):
@@ -249,19 +247,15 @@ class RotaryEmbedding(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        first, second = x.float().chunk(
-            2,
-            dim=-1,
-        )
-        rotated = torch.cat(
+        cos, sin = cos.to(x.dtype), sin.to(x.dtype)
+        first, second = x.chunk(2, dim=-1)
+        return torch.cat(
             (
                 first * cos - second * sin,
                 second * cos + first * sin,
             ),
             dim=-1,
         )
-
-        return rotated.to(dtype=x.dtype)
 
 
 class SiluAndMul(nn.Module):

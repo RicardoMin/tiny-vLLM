@@ -1,6 +1,6 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-14；用户 P0 已提交 0b89ba8，当前先完成仓库整理，再进入 P1。
+更新：2026-09-14；用户仓库整理已提交 f929cda，助手已验证 P1 分页 reference，待用户复现。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -15,7 +15,7 @@ Engine -> Scheduler + BlockManager -> StepPlan + BlockPlanTxn
        -> selected logits -> sampler -> StepResult -> Scheduler commit
 
 BlockManager -> BlockPool       CPU id / generation / free list
-ModelRunner  -> PagedKVCache    device K/V tensors（P1 接入）
+ModelRunner  -> PagedKVCache    全局 device K/V tensors
 ```
 
 Scheduler 管请求、预算和计划；BlockManager 独占请求 block table 与有效 KV 长度。
@@ -38,21 +38,24 @@ rollback、执行后 fail-stop、过期事务拒绝及完成/取消回收。本�
 
 ## P1：分页 reference 接线与生产路径收敛
 
-进入 P1 前先完成 MODULE_REPO_CLEANUP.md：submit 入队前验证、总序列长度限制、
+MODULE_REPO_CLEANUP.md 已完成：submit 入队前验证、总序列长度限制、
 Scheduler.shutdown 统一 fail-stop 清理、权重 shape 校验，以及删除无消费者的写块列表。
 max_model_len 限制 prompt + output 总长度；KV valid length 仅统计已执行 token。
 shutdown 是永久失败清理，不是恢复调度；不撤销已经完成步骤的语义。
 
 1. Runner 创建全局 PagedKVCache，与 BlockManager 使用相同容量和 block_size。
 2. CPU batch 边界检查 block 范围、slots 与表一致性及写入 slots 唯一性。
-3. 明确 dtype：reference index_copy/index_select 使用 int64；优化 kernel 可使用其
-   支持的 int32，转换显式。当前 ModelInput 的 int32 slots 与存储 int64 要求不兼容。
+3. reference index_copy/index_select 统一 int64。ModelInput 只保留 input_ids、positions、
+   sample_token_indices、write slots 和各请求 read slots；未消费的设备 metadata 不构造。
+   优化 kernel 可以引入实际消费的 int32 表，转换必须明确。
 4. 每层按 slots 写 K/V，按 block table 读取历史。reference 可先 gather 后 SDPA，
    chunked prefill 的 causal mask 必须带历史位置偏移。
 5. 独立小模型/连续张量 oracle 对照 hidden、selected logits、每层逻辑 K/V。
-   固定随机种子和独立数值基线，加入真实 Qwen3 BF16 多步验证；先记录原实现误差，
-   区分模型算子精度差异与分页改动误差。2026-09-14 的真实权重 BF16 HF 对照在
-   atol=0.15、rtol=0.02 下未全量通过，不得声称该精度验收已完成。
+   固定随机种子和独立数值基线。FP32 对 HF 完整前缀对照 hidden/logits/各层 KV；
+   真实 BF16 用相同 flat batch、相同 SDPA 计算模式的测试侧 dense KV oracle 隔离存储变化。
+   5 步含混合批、decode、重排、复用的 hidden/logits/各层 KV 已逐元素一致。
+   RMSNorm/RoPE 已对齐 HF 舍入。真实混合批对 HF 分请求增量计算仍有超出原容差的元素；
+   首差异在第一层 GEMM，源于批量行数形状。保留记录，不宣称跨计算形状位级一致。
 6. 同模块验收通过后删除 ContiguousKVCache 生产引用、cache= 分支、executor _caches
    兼容属性及旧测试；oracle 留在测试侧，不依赖另一份生产 executor。
 
@@ -60,9 +63,17 @@ shutdown 是永久失败清理，不是恢复调度；不撤销已经完成步�
 回收复用和失败清理。无逐请求完整 Transformer forward 循环。
 gather+SDPA 证明分页语义，但仍复制历史 KV，不能据此宣称高性能 paged kernel 已完成。
 
+当前接口：EagerExecutor/ModelRunner 显式接收 block_size、num_blocks、max_model_len；
+构造方从 Scheduler 读取这些值。Batch 快照包含 block_size/num_blocks，Runner 检查几何
+一致性；BatchBuilder 检查事务请求集合/顺序和每个 append 区间。Runner 不复制请求所有权。
+设备 write/read 是内部接口，只消费已校验/转换的 indices；不每层回读 GPU 数值做范围校验。
+调度器回收请求 blocks，executor.release 仅回收 RNG；全局 tensor 不因单请求结束而释放。
+
 ## P2：统一路径审计、基线与 profile
 
 基准协议和 nano 固定版本现在即可准备；P1 端到端可运行后开始同条件实测。
+先明确 BF16 与不同 batch/后端间允许的数值漂移及采样稳定性标准；不能用当前两个短
+prompt 或同计算形状的位级一致结果代替跨负载数值验收。
 清理重复校验、无用 metadata 与兼容层，保留公共语义。
 负载包含长 prefill、稳定 decode、混合长短请求、逐级并发、open-loop 到达；重复前缀
 单列并说明双方 prefix caching 设置。报告 TTFT/ITL/TPOT p50/p95、tokens/s、完成率、

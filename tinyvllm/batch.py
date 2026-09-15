@@ -116,6 +116,8 @@ class PreparedBatch:
     sample_request_ids: tuple[int, ...]
     sampling_params: tuple[SamplingParams, ...]
 
+    kv_block_size: int = 0
+    kv_num_blocks: int = 0
     kv_block_table_ids: tuple[int, ...] = ()
     kv_block_table_offsets: tuple[int, ...] = ()
     kv_slot_mapping: tuple[int, ...] = ()
@@ -193,6 +195,9 @@ class BatchBuilder:
                 "KV plan_id does not match step plan"
             )
 
+        if kv is not None and kv.request_ids != tuple(item.request_id for item in plan.items):
+            raise ValueError("KV requests must match all plan items in order")
+
         input_ids: list[int] = []
         positions: list[int] = []
         token_request_slots: list[int] = []
@@ -234,6 +239,9 @@ class BatchBuilder:
                 )
 
             if kv is not None:
+                if item.context_len_before != item.token_start:
+                    raise ValueError("context length must match append start")
+                kv.validate_append(item.request_id, item.token_start, item.query_len)
                 block_table = kv.staged_block_table(
                     item.request_id
                 )
@@ -295,6 +303,8 @@ class BatchBuilder:
             sample_token_indices=tuple(sample_token_indices),
             sample_request_ids=tuple(sample_request_ids),
             sampling_params=tuple(sampling_params),
+            kv_block_size=0 if kv is None else kv.block_size,
+            kv_num_blocks=0 if kv is None else kv.num_blocks,
             kv_block_table_ids=tuple(kv_block_table_ids),
             kv_block_table_offsets=tuple(kv_block_table_offsets),
             kv_slot_mapping=tuple(kv_slot_mapping),

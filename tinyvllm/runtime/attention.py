@@ -3,41 +3,32 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from tinyvllm.contiguous_kv import ContiguousKVCache
+from tinyvllm.batch import PreparedBatch
+from tinyvllm.paged_kv import PagedKVCache
+from tinyvllm.runtime.contracts import ModelInput
 
 class ReferenceAttention:
-    """Ragged SDPA reference; CPU offsets avoid device-to-host reads."""
+    """Paged storage plus per-request gather/SDPA, sharing one model forward"""
 
     def __init__(
         self,
-        q_offsets: tuple[int, ...],
-        context_lens_before: tuple[int, ...],
-        caches: tuple[ContiguousKVCache, ...],
+        batch: PreparedBatch,
+        model_input: ModelInput,
+        cache: PagedKVCache,
     ) -> None:
-        self.q_offsets = q_offsets
-        self.context_lens_before = context_lens_before
-        self.caches = caches
+        self.batch = batch
+        self.kv = model_input.kv
+        self.cache = cache
         self.masks: list[torch.Tensor | None] = []
 
-        # Build offset causal masks once per step, then reuse across layers.
-        for index, cache in enumerate(caches):
-            query_len = q_offsets[index + 1] - q_offsets[index]
-            past_len = context_lens_before[index]
+        for before, after, query_len in zip(
+            batch.context_lens_before, batch.context_lens_after, batch.query_lens,
+        ):
             mask = None
-            if past_len and query_len > 1:
-                query_positions = torch.arange(
-                    past_len,
-                    past_len + query_len,
-                    device=cache.key.device,
-                )
-                key_positions = torch.arange(
-                    past_len + query_len,
-                    device=cache.key.device,
-                )
-                mask = (
-                    key_positions.unsqueeze(0)
-                    <= query_positions.unsqueeze(1)
-                )[None, None]
+            if before and query_len > 1:
+                queries = torch.arange(before, after, device=cache.device)
+                keys = torch.arange(after, device=cache.device)
+                mask = (keys[None, :] <= queries[:, None])[None, None]
             self.masks.append(mask)
 
 
@@ -50,31 +41,22 @@ class ReferenceAttention:
         *,
         scale: float,
     ) -> torch.Tensor:
+        self.cache.write(layer_idx, self.kv.slot_mapping, k, v)
         output = torch.empty_like(q)
-        for index, cache in enumerate(self.caches):
-            start, end = self.q_offsets[index:index + 2]
-            past_len = self.context_lens_before[index]
-            cache.write(
-                layer_idx,
-                past_len,
-                k[start:end],
-                v[start:end],
-            )
-            keys, values = cache.read(
-                layer_idx,
-                past_len + end - start,
-            )
+
+        for index, slots in enumerate(self.kv.read_slots):
+            start, end = self.batch.q_offsets[index: index + 2]
+            keys, values = self.cache.read(layer_idx, slots)
             attended = F.scaled_dot_product_attention(
-                q[start:end].transpose(0, 1).unsqueeze(0),
+                q[start: end].transpose(0, 1).unsqueeze(0),
                 keys.transpose(0, 1).unsqueeze(0),
                 values.transpose(0, 1).unsqueeze(0),
                 attn_mask=self.masks[index],
                 dropout_p=0.0,
-                is_causal=past_len == 0,
+                is_causal=self.batch.context_lens_before[index] == 0,
                 scale=scale,
-                enable_gqa=q.shape[1] != k.shape[1]
+                enable_gqa=q.shape[1] != k.shape[1],
             )
-            output[start:end].copy_(
-                attended.squeeze(0).transpose(0, 1)
-            )
+            output[start: end].copy_(attended.squeeze(0).transpose(0, 1))
+
         return output

@@ -27,26 +27,17 @@ class AttentionBackend(Protocol):
 class PagedKVMetadata:
     """Logical paged-KV metadata lowered for one device batch."""
 
-    block_table_ids: torch.Tensor
-    block_table_offsets: torch.Tensor
     slot_mapping: torch.Tensor
+    read_slots: tuple[torch.Tensor, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ModelInput:
-    """Device-side model inputs derived from one prepared batch."""
+    """Only tensors consumed by the reference backend; offsets stay on CPU."""
 
     input_ids: torch.Tensor
     positions: torch.Tensor
-    token_request_slots: torch.Tensor
-
-    q_offsets: torch.Tensor
-    context_lens_before: torch.Tensor
-    query_lens: torch.Tensor
-    context_lens_after: torch.Tensor
-
     sample_token_indices: torch.Tensor
-    num_decode_items: int
     kv: PagedKVMetadata | None
 
     @classmethod
@@ -56,64 +47,37 @@ class ModelInput:
         *,
         device: torch.device | str,
     ) -> 'ModelInput':
-        index_kwargs = {
-            'dtype': torch.int32,
+        """Lower an already validated CPU batch once, not once per layer."""
+        if not batch.has_kv_metadata or batch.kv_block_size <= 0:
+            raise ValueError("model input requires paged KV metadata")
+        kwargs = {
+            'dtype': torch.long,
             'device': device,
         }
+        block_ids = torch.tensor(batch.kv_block_table_ids, **kwargs)
+        read_slots = []
 
-        kv: PagedKVMetadata | None = None
-        if batch.has_kv_metadata:
-            kv = PagedKVMetadata(
-                block_table_ids=torch.tensor(
-                    batch.kv_block_table_ids,
-                    **index_kwargs,
-                ),
-                block_table_offsets=torch.tensor(
-                    batch.kv_block_table_offsets,
-                    **index_kwargs,
-                ),
-                slot_mapping=torch.tensor(
-                    batch.kv_slot_mapping,
-                    **index_kwargs,
-                ),
-            )
+        for index, length in enumerate(batch.context_lens_after):
+            first, last = batch.kv_block_table_offsets[index: index + 2]
+            positions = torch.arange(length, **kwargs)
+            physical = block_ids[first:last].index_select(0, positions // batch.kv_block_size)
+            read_slots.append(physical * batch.kv_block_size + positions % batch.kv_block_size)
 
         return cls(
             input_ids=torch.tensor(
                 batch.input_ids,
-                dtype=torch.long,
-                device=device,
+                **kwargs,
             ),
             positions=torch.tensor(
                 batch.positions,
-                dtype=torch.long,
-                device=device,
-            ),
-            token_request_slots=torch.tensor(
-                batch.token_request_slots,
-                **index_kwargs,
-            ),
-            q_offsets=torch.tensor(
-                batch.q_offsets,
-                **index_kwargs,
-            ),
-            context_lens_before=torch.tensor(
-                batch.context_lens_before,
-                **index_kwargs,
-            ),
-            query_lens=torch.tensor(
-                batch.query_lens,
-                **index_kwargs,
-            ),
-            context_lens_after=torch.tensor(
-                batch.context_lens_after,
-                **index_kwargs,
+                **kwargs,
             ),
             sample_token_indices=torch.tensor(
                 batch.sample_token_indices,
-                dtype=torch.long,
-                device=device,
+                **kwargs,
             ),
-            num_decode_items=batch.num_decode_items,
-            kv=kv,
+            kv=PagedKVMetadata(
+                slot_mapping=torch.tensor(batch.kv_slot_mapping, **kwargs),
+                read_slots=tuple(read_slots),
+            ),
         )

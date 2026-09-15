@@ -9,17 +9,18 @@
 目前没有完成同条件性能比较的证据。不得擅自将目标改成单项快 10%，也不预先接受
 代码量为 nano-vLLM 的 2–2.5 倍；按统一范围统计并解释复杂度增量。
 
-- 用户源码：WSL `/home/ricardo/project/tiny-vllm`，本轮整理教程起点 `0b89ba8`，P0 已提交。
+- 用户源码：WSL `/home/ricardo/project/tiny-vllm`，P1 教程起点 `f929cda`，P0 与仓库整理已提交。
 - 助手工作区：WSL `/home/ricardo/project/tiny-vllm-codex`，main。
-- 本轮实现位于助手 `cb16aaa` 后的工作树，按用户 `0b89ba8` 重新对齐，未替用户提交。
+- 本轮实现位于助手 `cb16aaa` 后的工作树，按用户 `f929cda` 重新对齐，未替用户提交。
 - 模型：`/home/ricardo/models/Qwen3/Qwen3-0.6B`；权重不进 Git。
-- 用户 P0 源码验证：159 passed；助手仓库整理后：184 passed。测试同步不代表用户实施完成。
+- 用户基线验证：184 passed；助手 P1：185 passed / 1 skipped，真实权重 GPU 门禁另跑 1 passed。
+  测试同步不代表用户实施完成。
 
 基线已有 Engine 生命周期、连续调度、chunked prefill、混合计划、sampling、KV 事务、
-Qwen3 权重加载和 flat batch ModelRunner。Transformer 每 batch 调用一次，reference
-attention 内部仍逐请求调用 SDPA，使用 contiguous cache。
-PagedKVCache 已有物理存储原型；cuda 拼写、反向范围和 slot 越界检查已修复。
-物理存储尚未接入模型 attention，完成 P0 不意味着完成 PagedAttention。
+Qwen3 权重加载和 flat batch ModelRunner。助手 P1 已接入全局 PagedKVCache：Transformer
+每 batch 调用一次，每层统一写入 slots，再逐请求 gather 历史 KV 并执行 SDPA。
+ContiguousKVCache、cache= 模型分支及 executor 缓存兼容属性已从助手生产源码删除。
+这是分页 reference，不是 kernel 直接按块表读取的高性能 PagedAttention。
 
 ## 文档分工
 
@@ -27,6 +28,8 @@ PagedKVCache 已有物理存储原型；cuda 拼写、反向范围和 slot 越�
 - [TINY_VLLM_ARCHITECTURE_REVIEW.md](TINY_VLLM_ARCHITECTURE_REVIEW.md)：理由、已知限制和待解决接线问题。
 - [MODULE_P0_BLOCK_POOL.md](MODULE_P0_BLOCK_POOL.md)：本轮模块契约与验证记录。
 - [MODULE_REPO_CLEANUP.md](MODULE_REPO_CLEANUP.md)：P0 后全仓复查、整理教程与数值验证边界。
+- [MODULE_P1_PAGED_REFERENCE.md](MODULE_P1_PAGED_REFERENCE.md)：本轮契约、教程定位和验证结果。
+- [P1_NUMERICAL_ATTRIBUTION.md](P1_NUMERICAL_ATTRIBUTION.md)：BF16 舍入、GEMM 形状差异的归因。
 
 ## 协作规则
 

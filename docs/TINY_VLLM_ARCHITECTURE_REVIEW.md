@@ -33,6 +33,9 @@ ACTIVE 表示所有权，成功 complete 才推进有效长度。
 
 ## 下一阶段的真实接线工作
 
+以下是 P0 时的接线缺口，已由助手 P1 实现解决，用户是否实施须读最新源码确认。
+当前有效接口和验收见 MODULE_P1_PAGED_REFERENCE.md。
+
 当前 runner 仍用 ContiguousKVCache，分页存储未接模型。P1 需接容量、block table、
 slots lowering、历史 KV、causal mask 和回收；改名不完成这些工作。
 runtime slot_mapping 为 int32，而 PagedKVCache 要求 torch.long，需显式统一。
@@ -65,3 +68,19 @@ Engine 删除 _terminal_ids；cancel 已能根据待提交命令与 Scheduler �
 相同真实权重样例下，本轮修改前后 logits 逐元素完全一致；HF 差异在用户原提交已存在。
 当前可见开销还包括未使用 metadata 的设备张量构造、逐请求 SDPA 与 sampler、逐层
 KV 范围校验同步。这些需跟随 P1 接线和 P2 profile 分别处理，避免再造临时旁路。
+
+## P1 实现结果（助手工作区）
+
+全局分页 tensor 已取代逐请求连续缓存。ModelInput 删除未消费的设备表，只生成需要的
+int64 write/read slots，一次生成后跨层复用；范围/唯一性/映射检查留在 CPU Runner 边界。
+旧 PagedKVCache.logical_slots 与逐层 GPU 数值检查删除，底层张量接口不是外部验证入口。
+BatchBuilder 验证完整 txn 请求列表与 append 区间，不能让未执行 append 被一起 complete。
+Runner 不维护请求有效长度，不能独立重放历史 batch；可信 Engine 按当前事务串行派发。
+Snapshot 并非可供外部任意伪造/重放的服务接口，异步执行前需重审其有效期和回收屏障。
+
+RMSNorm 和 RoPE 低精度计算顺序已对齐 HF，原两个 BF16 短 prompt 的差异消失。
+混合批仍可能由于 GEMM 行数不同产生差异：第一层 qkv 输入一致，输出 3/20480
+元素不同，最大 3.814697265625e-06，发生在 attention 之前。它会在后续层放大；
+不将跨 batch BF16 数值一致性标为完成，也不通过调宽原容差隐藏该现象。
+同 flat batch、相同 SDPA 模式的独立 dense 存储 oracle 与 paged 5 步全量逐元素一致，
+证明当前已测路径的分页读写未引入额外变化。详细记录见 P1_NUMERICAL_ATTRIBUTION.md。

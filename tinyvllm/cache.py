@@ -195,6 +195,33 @@ class BlockPlanTxn:
     def plan_id(self) -> int:
         return self._plan_id
 
+    @property
+    def request_ids(self) -> tuple[int, ...]:
+        self._ensure_metadata_readable()
+        return tuple(self._token_ends)
+
+    @property
+    def block_size(self) -> int:
+        return self._manager.block_size
+
+    @property
+    def num_blocks(self) -> int:
+        return self._manager.pool.num_blocks
+
+    def validate_append(
+        self,
+        request_id: int,
+        token_start: int,
+        query_len: int,
+    ) -> None:
+        self._ensure_metadata_readable()
+        if (
+            request_id not in self._token_ends
+            or self._token_ends[request_id] != token_start + query_len
+            or len(self._slot_mappings[request_id]) != query_len
+        ):
+            raise ValueError("work item does not match its KV append")
+
     def _ensure_metadata_readable(self) -> None:
         if self._state not in (
             BlockTxnState.PREPARED,

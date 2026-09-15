@@ -1,346 +1,146 @@
-from __future__ import annotations
-
-from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 import torch
 
-from tinyvllm.batch import PreparedBatch, StepPlan
-from tinyvllm.contiguous_kv import ContiguousKVCache
+from tinyvllm.batch import BatchBuilder, StepPlan, WorkItem
+from tinyvllm.cache import BlockAppend, BlockManager
+from tinyvllm.request import RequestState, SamplingParams, WorkClass
+from tinyvllm.runtime.contracts import ModelInput
 from tinyvllm.runtime.runner import ModelRunner
-
-from test_batched_executor import (
-    MAX_MODEL_LEN,
-    decode_item,
-    make_request,
-    prefill_item,
-    prepare,
-    tiny_model,
-)
+from paged_helpers import logical_kv, models, prepare, scenario
 
 
-def mixed_batches() -> tuple[PreparedBatch, ...]:
-    first = make_request(11, (1, 2, 3), output=(7, 11))
-    second = make_request(22, (4, 5, 6, 8, 9))
-    third = make_request(33, (12, 13), output=(17,))
-
-    warmup = prepare(
-        StepPlan(
-            plan_id=1,
-            items=(
-                prefill_item(first, slot=4),
-                prefill_item(
-                    second,
-                    slot=8,
-                    query_len=2,
-                    should_sample=False,
-                ),
-            ),
-        ),
-        (first, second),
-    )
-    mixed = prepare(
-        StepPlan(
-            plan_id=2,
-            items=(
-                decode_item(
-                    first,
-                    slot=4,
-                    token_start=3,
-                    context_len_before=3,
-                ),
-                prefill_item(
-                    second,
-                    slot=8,
-                    token_start=2,
-                    query_len=2,
-                    context_len_before=2,
-                    should_sample=False,
-                ),
-                prefill_item(third, slot=12),
-            ),
-        ),
-        (first, second, third),
-    )
-    reordered = prepare(
-        StepPlan(
-            plan_id=3,
-            items=(
-                decode_item(
-                    third,
-                    slot=12,
-                    token_start=2,
-                    context_len_before=2,
-                ),
-                decode_item(
-                    first,
-                    slot=4,
-                    token_start=4,
-                    context_len_before=4,
-                ),
-                prefill_item(
-                    second,
-                    slot=8,
-                    token_start=4,
-                    query_len=1,
-                    context_len_before=4,
-                ),
-            ),
-        ),
-        (third, first, second),
-    )
-    return warmup, mixed, reordered
-
-
-def make_cache(model) -> ContiguousKVCache:
-    config = model.config
-    parameter = next(model.parameters())
-    return ContiguousKVCache(
-        num_layers=config.num_hidden_layers,
-        max_seq_len=MAX_MODEL_LEN,
-        num_kv_heads=config.num_key_value_heads,
-        head_dim=config.head_dim,
-        device=parameter.device,
-        dtype=parameter.dtype,
-    )
-
-
-def test_mixed_runner_matches_single_request_hidden_logits_and_kv() -> None:
-    model = tiny_model().eval()
-    oracle = deepcopy(model)
-    runner = ModelRunner(model, max_model_len=MAX_MODEL_LEN)
-    oracle_caches = {}
-    captured = []
-    handle = model.model.register_forward_hook(
-        lambda module, args, output: captured.append(
-            output.detach().clone()
-        )
-    )
-
+def test_paged_mixed_reordered_and_reused_blocks_match_hf_hidden_logits_and_kv():
+    model, hf = models()
+    manager = BlockManager(block_size=2, num_blocks=12)
+    runner = ModelRunner(model, block_size=2, num_blocks=12, max_model_len=32)
+    runner.kv_cache.key.fill_(float('nan'))
+    runner.kv_cache.value.fill_(float('nan'))
+    captured, calls = [], {}
+    handles = [model.model.register_forward_hook(lambda m, a, out: captured.append(out.detach().clone()))]
+    for name, module in model.named_modules():
+        if name.endswith(('qkv_proj', 'o_proj', 'gate_up_proj', 'down_proj')):
+            calls[name] = []
+            handles.append(module.register_forward_pre_hook(lambda m, a, name=name: calls[name].append(a[0].shape[0])))
+    records_list = list(scenario())
     try:
         with torch.inference_mode():
-            for batch in mixed_batches():
+            for step, records in enumerate(records_list):
+                txn, batch = prepare(manager, step, records)
+                txn.commit_before_dispatch()
                 captured.clear()
-                actual_logits = runner.run(batch)
-                expected_parts = []
-
-                for index, request_id in enumerate(batch.request_ids):
-                    if request_id not in oracle_caches:
-                        oracle_caches[request_id] = make_cache(oracle)
-                    start, end = batch.q_offsets[index:index + 2]
-                    expected_parts.append(
-                        oracle(
-                            torch.tensor(batch.input_ids[start:end]),
-                            torch.tensor(batch.positions[start:end]),
-                            cache=oracle_caches[request_id],
-                        )
-                    )
-
-                    actual_cache = runner._caches[request_id]
-                    expected_cache = oracle_caches[request_id]
-                    assert actual_cache.length == batch.context_lens_after[index]
-                    assert actual_cache.length == expected_cache.length
-                    for actual, expected in (
-                        (actual_cache.key, expected_cache.key),
-                        (actual_cache.value, expected_cache.value),
-                    ):
-                        torch.testing.assert_close(
-                            actual[:, :actual_cache.length],
-                            expected[:, :expected_cache.length],
-                            atol=1e-5,
-                            rtol=1e-5,
-                        )
-
-                expected_hidden = torch.cat(expected_parts)
+                for rows in calls.values():
+                    rows.clear()
+                actual = runner.run(batch)
                 assert len(captured) == 1
-                torch.testing.assert_close(
-                    captured[0],
-                    expected_hidden,
-                    atol=1e-5,
-                    rtol=1e-5,
-                )
-                expected_logits = oracle.compute_logits(
-                    expected_hidden,
-                    torch.tensor(
-                        batch.sample_token_indices,
-                        dtype=torch.long,
-                    ),
-                )
-                assert actual_logits is not None
-                torch.testing.assert_close(
-                    actual_logits,
-                    expected_logits,
-                    atol=1e-5,
-                    rtol=1e-5,
-                )
-    finally:
-        handle.remove()
-
-
-def test_runner_batches_every_projection_and_selects_only_sample_rows(
-    monkeypatch,
-) -> None:
-    model = tiny_model()
-    runner = ModelRunner(model, max_model_len=MAX_MODEL_LEN)
-    warmup, batch, _ = mixed_batches()
-    runner.run(warmup)
-    calls = {}
-    handles = []
-
-    def record_rows(name):
-        def hook(module, args):
-            calls[name].append(args[0].shape[0])
-        return hook
-
-    modules = {"model": model}
-    for index, layer in enumerate(model.model.layers):
-        modules.update(
-            {
-                f"qkv_{index}": layer.self_attn.qkv_proj,
-                f"o_{index}": layer.self_attn.o_proj,
-                f"gate_up_{index}": layer.mlp.gate_up_proj,
-                f"down_{index}": layer.mlp.down_proj,
-            }
-        )
-    for name, module in modules.items():
-        calls[name] = []
-        handles.append(
-            module.register_forward_pre_hook(record_rows(name))
-        )
-
-    logits_calls = []
-    original = model.compute_logits
-
-    def record_logits(hidden_states, token_indices=None):
-        assert token_indices is not None
-        logits_calls.append(
-            (hidden_states.shape[0], token_indices.tolist())
-        )
-        return original(hidden_states, token_indices)
-
-    monkeypatch.setattr(model, "compute_logits", record_logits)
-    try:
-        logits = runner.run(batch)
+                assert all(rows == [batch.num_query_tokens] for rows in calls.values())
+                expected_hidden, expected_logits = [], []
+                for index, (rid, seq, _, sample, _) in enumerate(records):
+                    before, after = batch.context_lens_before[index], batch.context_lens_after[index]
+                    assert manager.valid_token_count(rid) == before
+                    result = hf(torch.tensor([seq[:after]]), use_cache=True, output_hidden_states=True)
+                    expected_hidden.append(result.hidden_states[-1][0, before:after])
+                    if sample:
+                        expected_logits.append(result.logits[0, -1])
+                    keys, values = logical_kv(runner, manager, rid, after)
+                    for layer, (expected_k, expected_v) in enumerate(result.past_key_values):
+                        torch.testing.assert_close(keys[layer], expected_k[0].transpose(0, 1), atol=2e-5, rtol=2e-5)
+                        torch.testing.assert_close(values[layer], expected_v[0].transpose(0, 1), atol=2e-5, rtol=2e-5)
+                torch.testing.assert_close(captured[0], torch.cat(expected_hidden), atol=2e-5, rtol=2e-5)
+                torch.testing.assert_close(actual, torch.stack(expected_logits), atol=2e-5, rtol=2e-5)
+                txn.complete_writes()
+                if step == 2:
+                    table = manager.block_table(10)
+                    assert any(b.block_id != a.block_id + 1 for a, b in zip(table, table[1:]))
+                if step == 3:
+                    old = manager.block_table(22)
+                    manager.release_request(22)
+                    reused = ((44, (21, 22, 23), 3, True, WorkClass.PREFILL),)
+                    records_list.append(reused)
+                if step == 4:
+                    fresh = manager.block_table(44)
+                    assert {r.block_id for r in fresh} <= {r.block_id for r in old}
+                    assert min(r.generation for r in fresh) > min(r.generation for r in old)
     finally:
         for handle in handles:
             handle.remove()
 
-    assert all(
-        rows == [batch.num_query_tokens]
-        for rows in calls.values()
-    )
-    assert logits_calls == [
-        (batch.num_query_tokens, list(batch.sample_token_indices)),
-    ]
-    assert batch.sample_token_indices == (0, 4)
-    assert logits is not None
-    assert logits.shape == (2, model.config.vocab_size)
 
-
-def test_runner_skips_logits_when_no_item_samples(monkeypatch) -> None:
-    model = tiny_model()
-    runner = ModelRunner(model, max_model_len=MAX_MODEL_LEN)
-    batch = replace(
-        mixed_batches()[0],
-        sample_token_indices=(),
-        sample_request_ids=(),
-        sampling_params=(),
-    )
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("partial prefill must not compute logits")
-
-    monkeypatch.setattr(model, "compute_logits", forbidden)
+def test_partial_prefill_skips_logits_and_runner_does_not_commit_manager(monkeypatch):
+    model, _ = models()
+    manager = BlockManager(block_size=2, num_blocks=4)
+    runner = ModelRunner(model, block_size=2, num_blocks=4)
+    txn, batch = prepare(manager, 0, ((1, (1, 2, 3), 2, False, WorkClass.PREFILL),))
+    txn.commit_before_dispatch()
+    monkeypatch.setattr(model, 'compute_logits', lambda *a: pytest.fail('partial prefill computed logits'))
     assert runner.run(batch) is None
-    assert {
-        key: cache.length
-        for key, cache in runner._caches.items()
-    } == {
-        11: 3,
-        22: 2,
-    }
+    assert manager.valid_token_count(1) == 0
+    txn.complete_writes()
+    assert manager.valid_token_count(1) == 2
 
 
-@pytest.mark.parametrize(
-    "updates",
-    [
-        {"q_offsets": (0, 1, 2, 5)},
-        {"context_lens_after": (4, 5, 2)},
-        {"positions": (3, 2, 8, 0, 1)},
-        {"sample_token_indices": (0, 3)},
-        {"sample_request_ids": (33, 11)},
-    ],
-)
-def test_runner_rejects_invalid_metadata_before_any_kv_write(
-    updates,
-    monkeypatch,
-) -> None:
-    runner = ModelRunner(tiny_model(), max_model_len=MAX_MODEL_LEN)
-    warmup, batch, _ = mixed_batches()
-    runner.run(warmup)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("invalid batch must be rejected before KV writes")
-
-    monkeypatch.setattr(ContiguousKVCache, "write", forbidden)
+@pytest.mark.parametrize('updates', [
+    {'kv_block_size': 4}, {'kv_num_blocks': 9},
+    {'kv_block_table_ids': (-1, 1, 2)}, {'kv_block_table_ids': (0, 1, 8)},
+    {'kv_block_table_ids': (0, 1, 1)}, {'kv_block_table_offsets': (0, 1, 3)},
+    {'kv_block_table_offsets': ()}, {'kv_slot_mapping': (0, 0, 2, 4, 5)},
+    {'kv_slot_mapping': (0, 1, 3, 4, 5)}, {'kv_slot_mapping': (0, 1, 16, 4, 5)},
+    {'q_offsets': (0, 0, 5)}, {'positions': (0, 1, 8, 0, 1)},
+    {'request_ids': (10, 10)}, {'sample_token_indices': (1,)},
+    {'input_ids': (1, 2, 41, 3, 4)},
+])
+def test_invalid_cpu_metadata_rejected_before_lowering_and_writes(updates, monkeypatch):
+    model, _ = models()
+    manager = BlockManager(block_size=2, num_blocks=8)
+    runner = ModelRunner(model, block_size=2, num_blocks=8)
+    txn, batch = prepare(manager, 0, scenario()[0])
+    runner.kv_cache.key.fill_(17)
+    runner.kv_cache.value.fill_(23)
+    monkeypatch.setattr(ModelInput, 'from_prepared_batch', lambda *a, **kw: pytest.fail('invalid batch reached device lowering'))
     with pytest.raises(ValueError):
         runner.run(replace(batch, **updates))
-    assert runner._caches[11].length == 3
-    assert runner._caches[22].length == 2
+    assert (runner.kv_cache.key == 17).all()
+    assert (runner.kv_cache.value == 23).all()
+    txn.rollback()
+    assert manager.free_block_count == 8
 
 
-def test_runner_checks_all_cache_lengths_before_any_kv_write(
-    monkeypatch,
-) -> None:
-    runner = ModelRunner(tiny_model(), max_model_len=MAX_MODEL_LEN)
-    warmup, batch, _ = mixed_batches()
-    runner.run(warmup)
-    runner._caches[22].clear()
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("second cache mismatch must precede first cache write")
-
-    monkeypatch.setattr(ContiguousKVCache, "write", forbidden)
-    with pytest.raises(RuntimeError, match="cache length"):
-        runner.run(batch)
-    assert runner._caches[11].length == 3
-    assert runner._caches[22].length == 0
+def test_builder_rejects_same_plan_id_with_wrong_append_interval():
+    manager = BlockManager(block_size=2, num_blocks=4)
+    txn = manager.begin_plan(plan_id=0, appends=(BlockAppend(1, 0, 2),))
+    request = RequestState(1, 1, [1, 2, 3], SamplingParams(), 0)
+    for start, before in ((1, 1), (0, 1)):
+        plan = StepPlan(0, (WorkItem(1, 0, WorkClass.PREFILL, start, 2, before, False),))
+        with pytest.raises(ValueError):
+            BatchBuilder(max_model_len=32).prepare(plan, (request,), kv=txn)
+    txn.rollback()
 
 
-@pytest.mark.parametrize("failure_point", ("layer", "norm"))
-def test_model_failure_does_not_advance_any_cache(
-    failure_point,
-    monkeypatch,
-) -> None:
-    model = tiny_model()
-    runner = ModelRunner(model, max_model_len=MAX_MODEL_LEN)
-    warmup, batch, _ = mixed_batches()
-    runner.run(warmup)
-    prefixes = {
-        request_id: (
-            cache.key[:, :cache.length].clone(),
-            cache.value[:, :cache.length].clone(),
-        )
-        for request_id, cache in runner._caches.items()
-    }
+def test_lowered_indices_are_int64_and_history_is_in_logical_order():
+    model, _ = models()
+    manager = BlockManager(block_size=2, num_blocks=8)
+    txn, batch = prepare(manager, 0, scenario()[0])
+    runner = ModelRunner(model, block_size=2, num_blocks=8)
+    runner._validate(batch, runner.kv_cache)
+    data = ModelInput.from_prepared_batch(batch, device='cpu')
+    assert data.kv.slot_mapping.dtype == torch.long
+    assert data.kv.slot_mapping.tolist() == list(batch.kv_slot_mapping)
+    expected = []
+    for rid, length in zip(batch.request_ids, batch.context_lens_after):
+        table = txn.staged_block_table(rid)
+        expected.append([table[p // 2].block_id * 2 + p % 2 for p in range(length)])
+    assert [x.tolist() for x in data.kv.read_slots] == expected
+    assert all(x.dtype == torch.long for x in data.kv.read_slots)
+    txn.rollback()
 
-    def fail(*args, **kwargs):
-        raise RuntimeError("injected model failure")
 
-    target = (
-        model.model.layers[-1]
-        if failure_point == "layer"
-        else model.model.norm
-    )
-    monkeypatch.setattr(target, "forward", fail)
-    with pytest.raises(RuntimeError, match="injected model failure"):
-        runner.run(batch)
-
-    assert runner._caches[11].length == 3
-    assert runner._caches[22].length == 2
-    assert runner._caches[33].length == 0
-    for request_id, (key, value) in prefixes.items():
-        cache = runner._caches[request_id]
-        torch.testing.assert_close(cache.key[:, :cache.length], key)
-        torch.testing.assert_close(cache.value[:, :cache.length], value)
+def test_builder_rejects_extra_unexecuted_request_in_transaction():
+    manager = BlockManager(block_size=2, num_blocks=4)
+    txn = manager.begin_plan(plan_id=0, appends=(BlockAppend(1, 0, 1), BlockAppend(2, 0, 1)))
+    request = RequestState(1, 1, [1], SamplingParams(), 0)
+    plan = StepPlan(0, (WorkItem(1, 0, WorkClass.PREFILL, 0, 1, 0, True),))
+    with pytest.raises(ValueError, match="all plan items"):
+        BatchBuilder(max_model_len=32).prepare(plan, (request,), kv=txn)
+    txn.rollback()
+    assert manager.valid_token_count(1) == manager.valid_token_count(2) == 0

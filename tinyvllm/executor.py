@@ -10,7 +10,6 @@ from tinyvllm._validation import (
     _check_token_id,
 )
 from tinyvllm.batch import PreparedBatch, StepMode, StepResult
-from tinyvllm.contiguous_kv import ContiguousKVCache
 from tinyvllm.runtime.runner import ModelRunner
 from tinyvllm.sampling import TorchSampler
 
@@ -77,7 +76,7 @@ class CpuFakeExecutor:
 
 
 class EagerExecutor:
-    """Correctness-first executor for one or more requests."""
+    """Unified batch execution over a fixed global paged KV store."""
 
     capabilities = ExecutorCapabilities()
 
@@ -85,11 +84,15 @@ class EagerExecutor:
         self,
         model: nn.Module,
         *,
+        block_size: int,
+        num_blocks: int,
         max_model_len: int | None = None,
         sampler: TorchSampler | None = None,
     ) -> None:
         self.runner = ModelRunner(
             model,
+            block_size=block_size,
+            num_blocks=num_blocks,
             max_model_len=max_model_len,
         )
         self.sampler = (
@@ -98,22 +101,6 @@ class EagerExecutor:
             else sampler
         )
 
-    @property
-    def model(self) -> nn.Module:
-        return self.runner.model
-
-    @property
-    def device(self) -> torch.device:
-        return self.runner.device
-
-    @property
-    def max_model_len(self) -> int:
-        return self.runner.max_model_len
-
-    @property
-    def _caches(self) -> dict[int, ContiguousKVCache]:
-        return self.runner._caches
-
 
     @torch.inference_mode()
     def execute(
@@ -121,29 +108,20 @@ class EagerExecutor:
         batch: PreparedBatch,
     ) -> StepResult:
         logits = self.runner.run(batch)
+        tokens = ()
         if logits is not None:
-            sampled = self.sampler.sample(
-                logits,
-                batch.sampling_params,
-                batch.sample_request_ids,
-            )
-
-            sampled_token_ids = tuple(
-                int(token_id)
-                for token_id in sampled.tolist()
-            )
-        else:
-            sampled_token_ids = ()
+            sampled = self.sampler.sample(logits, batch.sampling_params, batch.sample_request_ids)
+            tokens = tuple(sampled.tolist())
 
         return StepResult(
-            plan_id=batch.plan_id,
-            sample_request_ids=batch.sample_request_ids,
-            sampled_token_ids=sampled_token_ids,
+            batch.plan_id,
+            batch.sample_request_ids,
+            tokens,
         )
 
 
     def release(self, request_id: int) -> None:
-        self.runner.release(request_id)
+        # Scheduler already returned the blocks; old tensor bytes need no wipe.
         self.sampler.release(request_id)
 
 

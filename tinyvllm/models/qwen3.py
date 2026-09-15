@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from tinyvllm.checkpoint import load_weights
-from tinyvllm.contiguous_kv import ContiguousKVCache
 from tinyvllm.runtime.contracts import AttentionBackend
 from tinyvllm.layers import (
     PackedLinear,
@@ -236,7 +235,6 @@ class Qwen3Attention(nn.Module):
 
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.num_kv_groups = config.num_key_value_groups
         self.head_dim = config.head_dim
         self.scale = self.head_dim**-0.5
         self.rotary_emb = rotary_emb
@@ -280,10 +278,6 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         *,
         layer_idx: int,
-        cache: ContiguousKVCache | None,
-        past_len: int,
-        attention_mask: torch.Tensor | None,
-        is_causal: bool,
         attention: AttentionBackend | None = None,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
@@ -323,55 +317,9 @@ class Qwen3Attention(nn.Module):
             k,
         )
 
-        if attention is not None:
-            output = attention(
-                layer_idx,
-                q,
-                k,
-                v,
-                scale=self.scale,
-            )
-            return self.o_proj(
-                output.reshape(num_tokens, -1)
-            )
+        output = attention(layer_idx, q, k, v, scale=self.scale)
 
-        end = past_len + num_tokens
-
-        if cache is not None:
-            cache.write(
-                layer_idx,
-                past_len,
-                k,
-                v,
-            )
-            k, v = cache.read(
-                layer_idx,
-                end,
-            )
-
-        q = q.transpose(0, 1).unsqueeze(0)
-        k = k.transpose(0, 1).unsqueeze(0)
-        v = v.transpose(0, 1).unsqueeze(0)
-
-        output = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
-            scale=self.scale,
-            enable_gqa=self.num_kv_groups > 1,
-        )
-
-        output = (
-            output
-            .squeeze(0)
-            .transpose(0, 1)
-            .reshape(num_tokens, -1)
-        )
-
-        return self.o_proj(output)
+        return self.o_proj(output.reshape(num_tokens, -1))
 
 
 class Qwen3MLP(nn.Module):
@@ -462,11 +410,7 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         *,
         layer_idx: int,
-        cache: ContiguousKVCache | None,
-        past_len: int,
-        attention_mask: torch.Tensor | None,
-        is_causal: bool,
-        attention: AttentionBackend | None = None,
+        attention: AttentionBackend,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -477,10 +421,6 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             positions,
             layer_idx=layer_idx,
-            cache=cache,
-            past_len=past_len,
-            attention_mask=attention_mask,
-            is_causal=is_causal,
             attention=attention,
         )
 
@@ -545,110 +485,30 @@ class Qwen3Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
         *,
-        cache: ContiguousKVCache | None = None,
-        attention: AttentionBackend | None = None,
+        attention: AttentionBackend,
     ) -> torch.Tensor:
-        if input_ids.ndim != 1:
+        if input_ids.ndim != 1 or input_ids.numel() == 0:
             raise ValueError(
                 "input_ids must be a flat 1-D tensor"
             )
 
-        if input_ids.dtype is not torch.long:
+        if input_ids.dtype is not torch.long or positions.dtype is not torch.long:
             raise TypeError(
-                "input_ids must use torch.long"
+                "input_ids and positions must use torch.long"
             )
 
-        num_tokens = input_ids.numel()
-
-        if num_tokens == 0:
+        if positions.shape != input_ids.shape or positions.device != input_ids.device:
             raise ValueError(
-                "input_ids must contain at least one token"
+                "positions must align with input_ids on the same device"
             )
-
-        past_len = (
-            cache.length
-            if cache is not None
-            else 0
-        )
-
-        if attention is not None:
-            if cache is not None:
-                raise ValueError(
-                    "cache and attention are mutually exclusive"
-                )
-            if positions is None:
-                raise ValueError(
-                    "batched attention requires explicit positions"
-                )
-
-        if positions is not None:
-            if positions.dtype is not torch.long:
-                raise TypeError("positions must use torch.long")
-            if positions.device != input_ids.device:
-                raise ValueError(
-                    "positions and input_ids must share a device"
-                )
-            if positions.shape != input_ids.shape:
-                raise ValueError(
-                    "positions must align with input_ids"
-                )
-
-        if attention is None:
-            expected_positions = torch.arange(
-                past_len,
-                past_len + num_tokens,
-                device=input_ids.device,
-            )
-            if positions is None:
-                positions = expected_positions
-            elif not torch.equal(positions, expected_positions):
-                raise ValueError(
-                    "positions must be contiguous after the cache"
-                )
-
-        attention_mask = None
-        is_causal = past_len == 0
-
-        if attention is None and past_len and num_tokens > 1:
-            query_positions = torch.arange(
-                past_len,
-                past_len + num_tokens,
-                device=input_ids.device,
-            )
-            key_positions = torch.arange(
-                past_len + num_tokens,
-                device=input_ids.device,
-            )
-
-            attention_mask = (
-                key_positions.unsqueeze(0)
-                <= query_positions.unsqueeze(1)
-            )[None, None]
-
-            is_causal = False
 
         hidden_states = self.embed_tokens(input_ids)
-
         for layer_idx, layer in enumerate(self.layers):
             hidden_states = layer(
-                hidden_states,
-                positions,
-                layer_idx=layer_idx,
-                cache=cache,
-                past_len=past_len,
-                attention_mask=attention_mask,
-                is_causal=is_causal,
-                attention=attention,
+                hidden_states, positions, layer_idx=layer_idx, attention=attention,
             )
 
-        hidden_states = self.norm(hidden_states)
-
-        if cache is not None:
-            cache.advance(
-                past_len + num_tokens
-            )
-
-        return hidden_states
+        return self.norm(hidden_states)
 
 
 class Qwen3ForCausalLM(nn.Module):
@@ -849,13 +709,11 @@ class Qwen3ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
         *,
-        cache: ContiguousKVCache | None = None,
-        attention: AttentionBackend | None = None,
+        attention: AttentionBackend,
     ) -> torch.Tensor:
         return self.model(
             input_ids,
             positions,
-            cache=cache,
             attention=attention,
         )
 
