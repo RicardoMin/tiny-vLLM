@@ -6,7 +6,7 @@
 ## 实现契约
 
 - Pool/Manager 是唯一请求块所有权与有效长度来源；Runner 只有一份全局物理 K/V。
-- EagerExecutor(model, block_size=..., num_blocks=..., max_model_len=...)。参数取自同一个
+- Executor(model, block_size=..., num_blocks=..., max_model_len=...)。参数取自同一个
   Scheduler。PreparedBatch 带 kv_block_size/kv_num_blocks，Runner 拒绝存储几何不一致。
 - Builder 检查全部事务请求、顺序、token_start/query_len 和 context_len_before 一致。
 - 每步 CPU 验证完整 query、block offsets、块范围/唯一性、slots 映射、采样边界及词表范围。
@@ -64,7 +64,7 @@ sampling/checkpoint 等其他公共语义测试。助手验证后仅同步 tests
 - paged_kv.py、runtime/contracts.py、runtime/attention.py、runtime/runner.py：替换全文件。
 - qwen3.py：从后往前替换 LM.forward 847–860、Model.forward 543–651、Decoder.forward
   459–496、Attention.forward 277–374；删239行 num_kv_groups 和14行 contiguous 导入。
-- executor.py：原79行 EagerExecutor 到 EOF 替换；删原13行 contiguous 导入。
+- executor.py：原79行 Executor 到 EOF 替换；删原13行 contiguous 导入。
 - layers.py：替换原247–264的 _rotate（保留246行 staticmethod）及153–159的 RMSNorm.forward。
 - 删除 tinyvllm/contiguous_kv.py；不需修改 Engine 或 Scheduler。
 

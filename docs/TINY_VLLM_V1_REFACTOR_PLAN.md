@@ -1,6 +1,6 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-14；用户仓库整理已提交 f929cda，助手已验证 P1 分页 reference，待用户复现。
+更新：2026-09-15；用户 P1 已提交 175975c，助手 P2-A 已验证，待用户按窗口教程复现。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -63,13 +63,25 @@ shutdown 是永久失败清理，不是恢复调度；不撤销已经完成步�
 回收复用和失败清理。无逐请求完整 Transformer forward 循环。
 gather+SDPA 证明分页语义，但仍复制历史 KV，不能据此宣称高性能 paged kernel 已完成。
 
-当前接口：EagerExecutor/ModelRunner 显式接收 block_size、num_blocks、max_model_len；
+当前接口：Executor/ModelRunner 显式接收 block_size、num_blocks、max_model_len；
 构造方从 Scheduler 读取这些值。Batch 快照包含 block_size/num_blocks，Runner 检查几何
 一致性；BatchBuilder 检查事务请求集合/顺序和每个 append 区间。Runner 不复制请求所有权。
 设备 write/read 是内部接口，只消费已校验/转换的 indices；不每层回读 GPU 数值做范围校验。
 调度器回收请求 blocks，executor.release 仅回收 RNG；全局 tensor 不因单请求结束而释放。
 
-## P2：统一路径审计、基线与 profile
+## P2-A：资源与调度收敛
+
+对应 MODULE_P2A_ADMISSION.md，审计证据见 ARCHITECTURE_AUDIT_20260915.md。
+按最大实际KV需求做逻辑准入，物理块仍按step增量分配；不维护第二份所有权表。
+删除容量fallback二次计划与BLOCKED分支；不可容纳单请求入队前拒绝。
+入口验证词表/上下文，构造检查块几何；active IDs有界、显式ID完成后可复用，远期heap按submit_seq防止旧项误激活。
+generate独占且整批原子准备，未来到达等待；执行中取消碰到同一步完成时退休失效取消并重新编号未消费命令。
+Engine仅保存错误摘要，shutdown清理CPU请求与KV，测试实际对象释放。
+Engine.from_config接通dtype/EOS/块几何，采用显式KV字节预算(默认2GiB)与加载权重后的CUDA实际用量检查。
+该上限不代表运行时activation/Graph峰值保证；自动profile定容进入P2-B，避免增加特制生产attention模拟器。
+保守准入可降低实际提前EOS负载的并发；保证有限工作负载完成，不宣称持续到达时无饥饿。P5再用重计算与公平性提高利用率。
+
+## P2-B：基线、数值契约与 profile
 
 基准协议和 nano 固定版本现在即可准备；P1 端到端可运行后开始同条件实测。
 先明确 BF16 与不同 batch/后端间允许的数值漂移及采样稳定性标准；不能用当前两个短
@@ -85,6 +97,13 @@ KV 峰值内存。可持续并发须给定延迟 SLO、到达率和窗口，不�
 候选为 varlen prefill、kernel 按表直接读取的 paged decode、Triton KV store；之后
 评估 decode CUDA Graph、融合算子和 metadata 复用。选型依据硬件、数值与维护成本。
 每项优化有 reference 对照、开关实验、端到端指标和生产代码增量。
+
+## P4/P5 与 v1 收口
+
+P4：metadata复用、局部融合、decode Graph、批量采样；每项保留数值对照、消融、端到端收益与代码增量。
+P5：重计算抢占/公平性，在共享前缀纳入正式目标矩阵前完成完整块复用、引用计数和淘汰。
+v1：统一入口、tokenizer/streaming与关闭/背压语义，冻结版本后完整对比nano-vLLM、vLLM、SGLang。
+第二个dense模型用小型ModelSpec/InferenceModel契约检验无需修改Scheduler，不先造大型插件框架。
 
 ## 后续与测试
 

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from tinyvllm.engine import Engine, GenerateRequest
-from tinyvllm.executor import EagerExecutor
+from tinyvllm.executor import Executor
 from tinyvllm.request import SamplingParams
 from tinyvllm.scheduler import Scheduler
 from paged_helpers import models
@@ -15,7 +15,7 @@ def engine_for(model, *, num_blocks=8):
         prefill_reserve_tokens=1, prefill_reserve_requests=1,
         kv_block_size=2, kv_num_blocks=num_blocks,
     )
-    executor = EagerExecutor(model, block_size=scheduler.kv_block_size,
+    executor = Executor(model, block_size=scheduler.kv_block_size,
                              num_blocks=scheduler.block_manager.pool.num_blocks,
                              max_model_len=scheduler.max_model_len)
     return Engine(scheduler, executor, clock=lambda: 0)

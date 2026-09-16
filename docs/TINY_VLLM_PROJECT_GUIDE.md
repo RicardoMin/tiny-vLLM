@@ -1,50 +1,40 @@
 # tiny-vLLM 项目入口与协作约定
 
-更新：2026-09-14。以同目录 TINY_VLLM_V1_REFACTOR_PLAN.md 为唯一有效路线。
+更新：2026-09-15。以 TINY_VLLM_V1_REFACTOR_PLAN.md 为架构路线；审计证据见 ARCHITECTURE_AUDIT_20260915.md。
 
-## 目标与实际状态
+## 目标与状态
 
-单 GPU、当前 dense Qwen3，学习简洁高性能推理框架。保留用户的目标：在相同条件下
-改善相对 nano-vLLM 的 TTFT、TPOT、吞吐和可持续并发，代码量不显著增加。
-目前没有完成同条件性能比较的证据。不得擅自将目标改成单项快 10%，也不预先接受
-代码量为 nano-vLLM 的 2–2.5 倍；按统一范围统计并解释复杂度增量。
+单GPU、当前dense Qwen3，学习简洁高性能推理框架。目标是在相同条件下改善相对nano-vLLM的TTFT、TPOT、吞吐、显存及可持续并发，并与vLLM/SGLang比较；代码量不显著增加。
+不擅自改成单项快10%或接受数倍代码量。目前没有完成框架间性能比较，不能声称领先。
 
-- 用户源码：WSL `/home/ricardo/project/tiny-vllm`，P1 教程起点 `f929cda`，P0 与仓库整理已提交。
-- 助手工作区：WSL `/home/ricardo/project/tiny-vllm-codex`，main。
-- 本轮实现位于助手 `cb16aaa` 后的工作树，按用户 `f929cda` 重新对齐，未替用户提交。
-- 模型：`/home/ricardo/models/Qwen3/Qwen3-0.6B`；权重不进 Git。
-- 用户基线验证：184 passed；助手 P1：185 passed / 1 skipped，真实权重 GPU 门禁另跑 1 passed。
-  测试同步不代表用户实施完成。
-
-基线已有 Engine 生命周期、连续调度、chunked prefill、混合计划、sampling、KV 事务、
-Qwen3 权重加载和 flat batch ModelRunner。助手 P1 已接入全局 PagedKVCache：Transformer
-每 batch 调用一次，每层统一写入 slots，再逐请求 gather 历史 KV 并执行 SDPA。
-ContiguousKVCache、cache= 模型分支及 executor 缓存兼容属性已从助手生产源码删除。
-这是分页 reference，不是 kernel 直接按块表读取的高性能 PagedAttention。
-
-## 文档分工
-
-- [TINY_VLLM_V1_REFACTOR_PLAN.md](TINY_VLLM_V1_REFACTOR_PLAN.md)：有效路线、职责与验收。
-- [TINY_VLLM_ARCHITECTURE_REVIEW.md](TINY_VLLM_ARCHITECTURE_REVIEW.md)：理由、已知限制和待解决接线问题。
-- [MODULE_P0_BLOCK_POOL.md](MODULE_P0_BLOCK_POOL.md)：本轮模块契约与验证记录。
-- [MODULE_REPO_CLEANUP.md](MODULE_REPO_CLEANUP.md)：P0 后全仓复查、整理教程与数值验证边界。
-- [MODULE_P1_PAGED_REFERENCE.md](MODULE_P1_PAGED_REFERENCE.md)：本轮契约、教程定位和验证结果。
-- [P1_NUMERICAL_ATTRIBUTION.md](P1_NUMERICAL_ATTRIBUTION.md)：BF16 舍入、GEMM 形状差异的归因。
+- 用户源码：WSL /home/ricardo/project/tiny-vllm，main，P1已提交175975c。
+- 助手工作区：WSL /home/ricardo/project/tiny-vllm-codex，main；P2-A已实现并验证，待用户按教程复现。
+- 模型：/home/ricardo/models/Qwen3/Qwen3-0.6B；权重不进Git。
+- 环境：PyTorch2.9.1+cu128、Transformers4.51.3、RTX5060Laptop；旧torch2.6/cu124锁与当前环境不等价，P2-B处理。
+- P1全局分页KV reference已完成。模型每batch一次forward，各层仍逐请求gather+SDPA，直接分页kernel未完成。
+- P2-A：逻辑容量准入、入口限制、活跃ID/远期堆、独占generate、失败资源释放、显式KV字节预算与Engine.from_config。
 
 ## 协作规则
 
-助手先在自己的 WSL 工作区实现并验证。推理框架源码只由用户按当前窗口教程修改；
-教程提供用户基线行号、函数锚点、精确替换代码、目的和难点，不能只给文件链接。
-测试由助手验证后迁移到用户 tests/，回复给测试简报，不展示长篇测试代码。
-架构和路线文档可直接修正并同步，Windows 文档副本保持一致。
-两边直接在 main 开发，用户自行 add/commit，不再每模块建分支。
-不得覆盖用户独立改动，测试已同步不代表源码已实施。
+助手先在自己的WSL工作区实现并验证；推理源码仅由用户按当前窗口教程修改。
+教程必须给用户当前基线行号、函数锚点、准确代码、目的与难点，不能只给文件链接或补丁。
+代码用正常开发格式：合理空行、缩进、空格和分段，不挤成连续短行；一个模块有完整可验证成果。
+同文件按旧行号从下往上操作。测试验证后由助手直接同步到用户tests/，窗口只给简报，不贴长篇完整测试。
+架构/路线文档可同步；两边在main开发，用户自行add/commit，不再每模块建分支。
+不得覆盖用户独立源码；测试同步不代表用户实施完成。
 
-## 验证与对比
+## 文档
 
-模块运行必要回归及 git diff --check。模型/设备路径改动才要求真实权重与 GPU 验证；
-CPU BlockPool 不需要加载 Qwen3。
-对标候选为 `GeeeekExplorer/nano-vllm` 的
-`bb823b3e06983d71485a8e1f23715ebd87d98ef8`，正式测量前核对 checkout。
-记录双方 SHA、模型/tokenizer、环境、dtype、停止条件、负载、warmup 和原始结果。
-不以删除空行或必要测试伪装架构精简。
+- TINY_VLLM_V1_REFACTOR_PLAN.md：路线与职责。
+- ARCHITECTURE_AUDIT_20260915.md：175975c全仓审计、复现证据和对标。
+- MODULE_P2A_ADMISSION.md：本模块容量/生命周期/预算契约与验证。
+- MODULE_P1_PAGED_REFERENCE.md、MODULE_P0_BLOCK_POOL.md、MODULE_REPO_CLEANUP.md：历史模块记录。
+- P1_NUMERICAL_ATTRIBUTION.md：BF16归因及尚未关闭的跨计算形状数值问题。
+
+## 验收
+
+每模块做相关回归、必要真实模型门禁和git diff --check。
+P2-A的保守容量准入只保证有限工作负载推进，不宣称无饥饿或性能收益。
+显式KV预算不是运行时显存硬上限，activation/Graph自动profiling定容进入P2-B。
+nano候选固定SHA bb823b3e06983d71485a8e1f23715ebd87d98ef8；正式测量记录所有框架SHA/依赖/模型/负载/停止条件/原始指标。
+用户仓库实施后需要重新验证，不能直接复用助手通过结论。

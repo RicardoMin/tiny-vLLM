@@ -14,7 +14,7 @@ from tinyvllm.request import (
 )
 from tinyvllm.scheduler import (
     AddCommand,
-    BlockedReason,
+    CancelCommand,
     ScheduleDecision,
     Scheduler,
     TxnState,
@@ -511,8 +511,8 @@ def test_bad_result_fails_before_publish(
     with pytest.raises((RuntimeError, ValueError)):
         scheduler.commit_step(txn, result, now_ns=2)
 
-    assert scheduler.get_request(10).inflight_plan_id is None
-    assert scheduler.get_request(11).inflight_plan_id is None
+    assert scheduler.request_ids == ()
+    assert scheduler.completed_request_ids == ()
     assert scheduler.waiting_request_ids == ()
     assert txn.state is TxnState.FAILED
     assert txn.kv.state is BlockTxnState.FAILED
@@ -528,9 +528,11 @@ def test_executor_failure_is_fail_stop() -> None:
     )
     txn, _ = _run_fake_step(scheduler)
 
+    request = scheduler.get_request(10)
     scheduler.fail_step(txn)
 
-    request = scheduler.get_request(10)
+    assert scheduler.request_ids == ()
+    assert scheduler.completed_request_ids == ()
     assert txn.state is TxnState.FAILED
     assert txn.kv.state is BlockTxnState.FAILED
     assert request.inflight_plan_id is None
@@ -868,52 +870,6 @@ def test_begin_step_reserves_kv_without_publishing_table() -> None:
     )
 
 
-def test_kv_capacity_failure_is_atomic_and_returns_no_schedule() -> None:
-    scheduler = make_scheduler(
-        active=1,
-        rows=1,
-        tokens=10,
-        chunk=8,
-        model_len=8,
-        kv_block_size=4,
-        kv_num_blocks=1,
-    )
-
-    scheduler.apply_commands(
-        (command(0, 10, prompt_len=4, max_new_tokens=2),),
-        now_ns=0,
-    )
-    txn = scheduler.begin_step(now_ns=0)
-    assert txn is not None
-    batch = BatchBuilder(max_model_len=8).prepare(
-        txn.plan,
-        (scheduler.get_request(10),),
-        kv=txn.kv,
-    )
-    scheduler.mark_dispatched(txn, now_ns=0)
-    scheduler.commit_step(
-        txn,
-        CpuFakeExecutor(token_id=99).execute(batch),
-        now_ns=1,
-    )
-
-    scheduler.apply_commands((), now_ns=1)
-    before = committed_state(scheduler)
-    before_pool = scheduler.block_manager.pool.snapshot()
-
-    assert scheduler.begin_step(now_ns=1) is None
-    assert scheduler.last_decision is ScheduleDecision.BLOCKED
-    assert scheduler.blocked_reason is BlockedReason.KV_CAPACITY
-
-    assert committed_state(scheduler) == before
-    assert (
-        scheduler.block_manager.pool.snapshot()
-        == before_pool
-    )
-    assert scheduler.block_manager.block_table(10)
-    assert scheduler.block_manager.valid_token_count(10) == 4
-    assert not scheduler.has_open_transaction
-
 
 def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
     scheduler = make_scheduler(
@@ -954,113 +910,6 @@ def test_batch_prepare_failure_can_roll_back_the_combined_plan() -> None:
     )
 
 
-def test_kv_fallback_runs_decode_that_reuses_a_partial_page() -> None:
-    scheduler = make_scheduler(
-        active=2,
-        rows=2,
-        tokens=8,
-        chunk=8,
-        model_len=8,
-        kv_block_size=4,
-        kv_num_blocks=2,
-    )
-    scheduler.apply_commands(
-        (
-            command(0, 10, prompt_len=4, max_new_tokens=2),
-            command(1, 11, prompt_len=3, max_new_tokens=2),
-        ),
-        now_ns=0,
-    )
-
-    _commit_fake_step(scheduler, 0)
-
-    scheduler.apply_commands((), now_ns=3)
-    txn = scheduler.begin_step(now_ns=3)
-
-    assert txn is not None
-    assert txn.kv_fallback
-    assert tuple(
-        item.request_id for item in txn.plan.items
-    ) == (11,)
-    assert txn.plan.items[0].work_class is WorkClass.DECODE
-
-    batch = BatchBuilder(max_model_len=8).prepare(
-        txn.plan,
-        (scheduler.get_request(11),),
-        kv=txn.kv,
-    )
-    scheduler.mark_dispatched(txn, now_ns=4)
-    scheduler.commit_step(
-        txn,
-        CpuFakeExecutor(token_id=99).execute(batch),
-        now_ns=5,
-    )
-
-    assert scheduler.get_request(11).status is RequestStatus.FINISHED
-    assert scheduler.block_manager.pool.free_block_count == 1
-
-    scheduler.apply_commands((), now_ns=6)
-    next_txn = scheduler.begin_step(now_ns=6)
-
-    assert next_txn is not None
-    assert not next_txn.kv_fallback
-    assert tuple(
-        item.request_id for item in next_txn.plan.items
-    ) == (10,)
-
-    scheduler.rollback(next_txn)
-
-
-def test_kv_fallback_compacts_a_later_waiting_prefill_slot() -> None:
-    scheduler = make_scheduler(
-        active=2,
-        rows=2,
-        tokens=8,
-        chunk=8,
-        model_len=8,
-        kv_block_size=4,
-        kv_num_blocks=1,
-    )
-    scheduler.apply_commands(
-        (
-            command(0, 10, prompt_len=5),
-            command(1, 11, prompt_len=1),
-        ),
-        now_ns=0,
-    )
-
-    txn = scheduler.begin_step(now_ns=0)
-
-    assert txn is not None
-    assert txn.kv_fallback
-    assert tuple(
-        item.request_id for item in txn.plan.items
-    ) == (10,)
-    assert txn.plan.items[0].request_slot == 0
-
-    scheduler.rollback(txn)
-    assert scheduler.waiting_request_ids == (10, 11)
-
-    txn = scheduler.begin_step(now_ns=0)
-    assert txn is not None
-    assert txn.kv_fallback
-
-    batch = BatchBuilder(max_model_len=8).prepare(
-        txn.plan,
-        (scheduler.get_request(10),),
-        kv=txn.kv,
-    )
-    scheduler.mark_dispatched(txn, now_ns=1)
-
-    assert scheduler.waiting_request_ids == (11,)
-    assert scheduler.get_request(10).active_slot == 0
-    assert scheduler.get_request(11).active_slot is None
-
-    scheduler.commit_step(
-        txn,
-        CpuFakeExecutor(token_id=99).execute(batch),
-        now_ns=2,
-    )
 
 
 def test_terminal_release_precedes_consumption() -> None:
@@ -1162,32 +1011,200 @@ def test_consume_finished_is_fifo_and_bounded() -> None:
         scheduler.consume_finished(max_items=True)
 
 
-def test_kv_fallback_truncates_prefill_chunk() -> None:
+
+
+def test_individually_impossible_request_is_rejected_atomically() -> None:
     scheduler = make_scheduler(
-        active=1,
-        rows=1,
-        tokens=8,
-        chunk=8,
+        active=2,
         model_len=8,
-        reserve_tokens=0,
-        reserve_rows=0,
         kv_block_size=4,
         kv_num_blocks=1,
     )
 
+    with pytest.raises(ValueError, match="request exceeds KV capacity"):
+        scheduler.apply_commands(
+            (
+                command(0, 10, prompt_len=1, max_new_tokens=1),
+                command(1, 11, prompt_len=4, max_new_tokens=2),
+            ),
+            now_ns=0,
+        )
+
+    assert scheduler.request_ids == ()
+    assert scheduler.last_command_seq == -1
+    assert scheduler.block_manager.free_block_count == 1
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "max_new_tokens", "model_len", "kv_tokens"),
+    (
+        (3, 0, 8, 0),
+        (3, 1, 8, 3),
+        (3, 2, 8, 4),
+        (3, 3, 8, 5),
+        (3, 99, 8, 7),
+        (7, 99, 8, 7),
+        (8, 1, 8, 8),
+    ),
+)
+def test_admission_accounts_for_last_token_and_model_limit(
+    prompt_len: int,
+    max_new_tokens: int,
+    model_len: int,
+    kv_tokens: int,
+) -> None:
+    scheduler = make_scheduler(
+        active=1,
+        model_len=model_len,
+        kv_block_size=1,
+        kv_num_blocks=max(1, kv_tokens),
+    )
     scheduler.apply_commands(
-        (command(0, 10, prompt_len=5),),
+        (command(0, 10, prompt_len=prompt_len, max_new_tokens=max_new_tokens),),
         now_ns=0,
     )
 
-    txn = scheduler.begin_step(now_ns=0)
+    for now_ns in range(0, 100, 3):
+        if scheduler.get_request(10).terminal:
+            break
+        _commit_fake_step(scheduler, now_ns)
+    else:
+        pytest.fail("request did not complete within its KV promise")
+
+    assert scheduler.get_request(10).computed_tokens == kv_tokens
+    assert scheduler.block_manager.free_block_count == max(1, kv_tokens)
+
+
+def test_small_pool_serializes_prompts_instead_of_deadlocking() -> None:
+    scheduler = make_scheduler(
+        active=2,
+        rows=1,
+        tokens=2,
+        chunk=2,
+        kv_block_size=2,
+        kv_num_blocks=2,
+    )
+    scheduler.apply_commands(
+        (
+            command(0, 10, prompt_len=3, max_new_tokens=1),
+            command(1, 11, prompt_len=3, max_new_tokens=1),
+        ),
+        now_ns=0,
+    )
+
+    plans = []
+    for now_ns in range(0, 12, 3):
+        plan, _ = _commit_fake_step(scheduler, now_ns)
+        plans.append(tuple(item.request_id for item in plan.items))
+
+    assert plans == [(10,), (10,), (11,), (11,)]
+    assert scheduler.completed_request_ids == (10, 11)
+    assert scheduler.block_manager.free_block_count == 2
+
+
+def test_admission_skips_large_waiter_and_preserves_rollback() -> None:
+    scheduler = make_scheduler(
+        active=2,
+        rows=2,
+        tokens=2,
+        chunk=1,
+        kv_block_size=2,
+        kv_num_blocks=3,
+    )
+    scheduler.apply_commands(
+        (command(0, 10, prompt_len=2, max_new_tokens=2),),
+        now_ns=0,
+    )
+    _commit_fake_step(scheduler, 0)
+    scheduler.apply_commands(
+        (
+            command(1, 11, prompt_len=3, max_new_tokens=1),
+            command(2, 12, prompt_len=1, max_new_tokens=1),
+        ),
+        now_ns=3,
+    )
+    before = committed_state(scheduler)
+    txn = scheduler.begin_step(now_ns=3)
 
     assert txn is not None
-    assert txn.kv_fallback
-    assert (
-        txn.plan.items[0].request_id,
-        txn.plan.items[0].query_len,
-        txn.plan.items[0].should_sample,
-    ) == (10, 4, False)
-
+    assert tuple(item.request_id for item in txn.plan.items) == (10, 12)
+    assert txn.plan.items[1].request_slot == 1
+    assert scheduler.waiting_request_ids == (11, 12)
     scheduler.rollback(txn)
+    assert committed_state(scheduler) == before
+
+    plan, finished = _commit_fake_step(scheduler, 3)
+    assert tuple(item.request_id for item in plan.items) == (10, 12)
+    assert finished == (12,)
+    assert scheduler.waiting_request_ids == (11,)
+
+    for now_ns in range(6, 24, 3):
+        if scheduler.get_request(11).terminal:
+            break
+        _commit_fake_step(scheduler, now_ns)
+
+    assert scheduler.get_request(10).terminal
+    assert scheduler.get_request(11).terminal
+
+
+@pytest.mark.parametrize("peek_before_promotion", (False, True))
+def test_cancelled_future_id_can_be_reused_without_early_arrival(
+    peek_before_promotion: bool,
+) -> None:
+    scheduler = make_scheduler()
+    scheduler.apply_commands(
+        (command(0, 10, arrival_ns=100), CancelCommand(1, 10)),
+        now_ns=0,
+    )
+    scheduler.consume_finished()
+    scheduler.apply_commands(
+        (command(2, 10, arrival_ns=200),),
+        now_ns=0,
+    )
+
+    if peek_before_promotion:
+        assert scheduler.next_arrival_ns == 200
+    scheduler.apply_commands((), now_ns=100)
+    assert scheduler.get_request(10).status is RequestStatus.PENDING
+    assert scheduler.waiting_request_ids == ()
+    assert scheduler.next_arrival_ns == 200
+    scheduler.apply_commands((), now_ns=200)
+    assert scheduler.waiting_request_ids == (10,)
+    assert scheduler.next_arrival_ns is None
+
+
+def test_cancelled_arrival_heap_is_periodically_compacted() -> None:
+    scheduler = make_scheduler()
+    commands = []
+    for request_id in range(200):
+        commands.extend(
+            (
+                command(2 * request_id, request_id, arrival_ns=1000 + request_id),
+                CancelCommand(2 * request_id + 1, request_id),
+            )
+        )
+    commands.append(command(400, 200, arrival_ns=2000))
+    scheduler.apply_commands(tuple(commands), now_ns=0)
+    scheduler.consume_finished()
+
+    assert len(scheduler._pending_arrivals) == 1
+    assert scheduler.next_arrival_ns == 2000
+    assert scheduler.request_ids == (200,)
+
+
+def test_shutdown_discards_pending_and_unconsumed_cpu_requests() -> None:
+    scheduler = make_scheduler()
+    scheduler.apply_commands(
+        (
+            command(0, 10, max_new_tokens=0),
+            command(1, 11, arrival_ns=100),
+        ),
+        now_ns=0,
+    )
+
+    scheduler.shutdown()
+
+    assert scheduler.request_ids == ()
+    assert scheduler.completed_request_ids == ()
+    assert scheduler.next_arrival_ns is None
+    assert scheduler.consume_finished() == ()

@@ -1,3 +1,7 @@
+> 2026-09-15 状态更新：用户 P1 已提交175975c。当前全仓审计见 ARCHITECTURE_AUDIT_20260915.md，
+> P2-A实现契约见 MODULE_P2A_ADMISSION.md；以下P1以前的状态描述作为历史理由保留。
+> P2-A采用保守逻辑准入与显式KV字节预算，自动profile定容留P2-B。助手验证不代表用户已复现。
+
 # tiny-vLLM 架构复查
 
 更新：2026-09-14；P0 历史复查如下，最新全仓整理依据用户 0b89ba8，见 MODULE_REPO_CLEANUP.md。

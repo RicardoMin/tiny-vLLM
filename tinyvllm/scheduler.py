@@ -2,7 +2,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from heapq import heappop, heappush
+from heapq import heapify, heappop, heappush
 
 from tinyvllm.batch import StepPlan, StepResult, WorkItem
 from tinyvllm.request import (
@@ -76,22 +76,6 @@ class ScheduleDecision(Enum):
 
     PLAN = auto()
     IDLE = auto()
-    BLOCKED = auto()
-
-
-class BlockedReason(Enum):
-    """Resource condition that prevents the next plan from progressing."""
-
-    KV_CAPACITY = auto()
-
-
-class SchedulerResourceError(RuntimeError):
-    """The scheduler cannot make progress with its configured resources."""
-
-    def __init__(self, reason: BlockedReason | None) -> None:
-        self.reason = reason
-        detail = "unknown reason" if reason is None else reason.name.lower()
-        super().__init__(f"scheduler is blocked: {detail}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +83,6 @@ class ScheduleTxn:
     plan: StepPlan
     kv: BlockPlanTxn
     rotate_prefill: bool = False
-    kv_fallback: bool = False
     state: TxnState = field(default=TxnState.PREPARED, init=False)
 
 
@@ -172,6 +155,7 @@ class Scheduler:
 
         self._requests: dict[int, RequestState] = {}
         self._pending_arrivals: list[tuple[int, int, int]] = []
+        self._stale_arrivals = 0
         self._waiting_ids: deque[int] = deque()
         self._prefill_ids: deque[int] = deque()
         self._decode_ids: deque[int] = deque()
@@ -187,7 +171,6 @@ class Scheduler:
         self._next_plan_id = 0
         self._open_txn: ScheduleTxn | None = None
         self._last_decision = ScheduleDecision.IDLE
-        self._blocked_reason: BlockedReason | None = None
         self._failed = False
 
 
@@ -207,13 +190,8 @@ class Scheduler:
 
 
     @property
-    def blocked_reason(self) -> BlockedReason | None:
-        return self._blocked_reason
-
-
-    @property
     def request_ids(self) -> tuple[int, ...]:
-        """Includes terminal requests whose results whose results are not consumed yet."""
+        """Includes terminal requests whose results are not consumed yet."""
         return tuple(self._requests)
 
 
@@ -238,6 +216,53 @@ class Scheduler:
             event.request_id
             for event in self._completion_events
         )
+
+
+    @property
+    def next_arrival_ns(self) -> int | None:
+        """Return the next live arrival, ignoring cancelled heap entries."""
+
+        while self._pending_arrivals:
+            entry = self._pending_arrivals[0]
+
+            if self._is_live_arrival(entry):
+                return entry[0]
+
+            heappop(self._pending_arrivals)
+            self._stale_arrivals -= 1
+
+        return None
+
+
+    def validate_request(
+        self,
+        prompt_token_ids: tuple[int, ...],
+        sampling: SamplingParams,
+    ) -> None:
+        """Reject requests that cannot finish within the configured KV pool."""
+        if not isinstance(sampling, SamplingParams):
+            raise TypeError("sampling must be SamplingParams")
+
+        if not prompt_token_ids:
+            raise ValueError("prompt_token_ids must be non-empty")
+
+        for token_id in prompt_token_ids:
+            _check_token_id(token_id)
+
+        if len(prompt_token_ids) > self.max_model_len:
+            raise ValueError("prompt exceeds max_model_len")
+
+        demand = self._request_block_demand(
+            len(prompt_token_ids),
+            sampling,
+        )
+
+        if demand > self._block_manager.pool.num_blocks:
+            raise ValueError(
+                "request exceeds KV capacity: "
+                f"needs {demand} blocks, "
+                f"pool has {self._block_manager.pool.num_blocks}"
+            )
 
 
     def get_request(self, request_id: int) -> RequestState:
@@ -310,8 +335,10 @@ class Scheduler:
                         f"duplicate request_id: {command.request_id}"
                     )
 
-                if len(command.prompt_token_ids) > self.max_model_len:
-                    raise ValueError("prompt exceeds max_model_len")
+                self.validate_request(
+                    command.prompt_token_ids,
+                    command.sampling,
+                )
 
                 staged.append(
                     RequestState(
@@ -359,6 +386,7 @@ class Scheduler:
 
         self._now_ns = now_ns
         self._promote_arrivals(now_ns)
+        self._compact_arrivals()
         self._command_cutoff_ready = True
 
 
@@ -378,7 +406,6 @@ class Scheduler:
             )
 
         self._last_decision = ScheduleDecision.IDLE
-        self._blocked_reason = None
 
         decode_candidates = [
             (
@@ -396,15 +423,7 @@ class Scheduler:
             for request_id in self._prefill_ids
         ]
 
-        waiting_prefill_candidates = []
-        if self._waiting_ids:
-            waiting_prefill_candidates.extend(
-                (self._requests[request_id], request_slot)
-                for request_id, request_slot in zip(
-                    self._waiting_ids,
-                    self._free_slots(),
-                )
-            )
+        waiting_prefill_candidates = self._admission_candidates()
 
         has_active_prefill = bool(active_prefill_candidates)
         has_waiting_prefill = bool(waiting_prefill_candidates)
@@ -527,33 +546,10 @@ class Scheduler:
             ),
         )
 
-        kv_fallback = kv_txn is None
-        if kv_fallback:
-            items = self._fit_kv_capacity(items)
-            if not items:
-                self._last_decision = ScheduleDecision.BLOCKED
-                self._blocked_reason = BlockedReason.KV_CAPACITY
-                return None
-
-            plan = StepPlan(
-                plan_id=plan.plan_id,
-                items=tuple(items),
+        if kv_txn is None:
+            raise RuntimeError(
+                "admitted requests exceeded their KV budget"
             )
-            kv_txn = self._block_manager.begin_plan(
-                plan_id=plan.plan_id,
-                appends=tuple(
-                    BlockAppend(
-                        request_id=item.request_id,
-                        token_start=item.token_start,
-                        query_len=item.query_len,
-                    )
-                    for item in plan.items
-                ),
-            )
-            if kv_txn is None:
-                raise RuntimeError(
-                    "KV fallback selected an over-capacity batch"
-                )
 
         txn = ScheduleTxn(
             plan=plan,
@@ -561,7 +557,6 @@ class Scheduler:
             rotate_prefill=(
                 has_active_prefill and has_waiting_prefill
             ),
-            kv_fallback=kv_fallback,
         )
         self._next_plan_id += 1
         self._open_txn = txn
@@ -591,19 +586,12 @@ class Scheduler:
                 request = self._requests[item.request_id]
 
                 if item.work_class is WorkClass.DECODE:
-                    self._pop_ready(
-                        self._decode_ids,
-                        request.request_id,
-                        txn.kv_fallback,
-                    )
+                    self._decode_ids.remove(request.request_id)
                 elif request.status is RequestStatus.WAITING:
-                    self._pop_ready(
-                        self._waiting_ids,
-                        request.request_id,
-                        txn.kv_fallback,
-                    )
+                    self._waiting_ids.remove(request.request_id)
                     request.status = RequestStatus.RUNNING
                     request.active_slot = item.request_slot
+
                     self._slot_request_ids[item.request_slot] = (
                         request.request_id
                     )
@@ -611,11 +599,7 @@ class Scheduler:
                     if request.admitted_ns is None:
                         request.admitted_ns = now_ns
                 else:
-                    self._pop_ready(
-                        self._prefill_ids,
-                        request.request_id,
-                        txn.kv_fallback,
-                    )
+                    self._prefill_ids.remove(request.request_id)
 
                 request.inflight_plan_id = plan_id
 
@@ -733,12 +717,18 @@ class Scheduler:
         """Permanently stop scheduling and dicard all KV ownership."""
         self._failed = True
         txn = self._open_txn
+
         self._block_manager.teardown(None if txn is None else txn.kv)
+
         if txn is not None:
             object.__setattr__(txn, "state", TxnState.FAILED)
+
         for request in self._requests.values():
             request.inflight_plan_id = None
             request.active_slot = None
+
+        self._requests.clear()
+        self._completion_events.clear()
         self._pending_arrivals.clear()
         self._waiting_ids.clear()
         self._prefill_ids.clear()
@@ -774,99 +764,62 @@ class Scheduler:
             if request_id is None
         )
 
-    @staticmethod
-    def _pop_ready(
-        ready_ids: deque[int],
-        request_id: int,
-        kv_fallback: bool,
-    ) -> None:
-        if kv_fallback:
-            ready_ids.remove(request_id)
-        else:
-            ready_ids.popleft()
-
-
-    def _max_prefill_tokens(
+    def _request_block_demand(
         self,
-        item: WorkItem,
-        remaining_blocks: int,
+        prompt_len: int,
+        sampling: SamplingParams,
     ) -> int:
-        allocated_blocks = len(
-            self._block_manager.block_table(item.request_id)
-        )
-        tail_capacity = (
-            allocated_blocks * self.kv_block_size
-            - item.token_start
-        )
-        return max(
-            0,
-            tail_capacity + remaining_blocks * self.kv_block_size,
+        if sampling.max_new_tokens == 0:
+            return 0
+
+        output_limit = min(
+            sampling.max_new_tokens,
+            self.max_model_len - prompt_len,
         )
 
-    def _fit_kv_capacity(
-        self,
-        items: list[WorkItem],
-    ) -> list[WorkItem]:
-        remaining_blocks = self._block_manager.free_block_count
-        selected: list[WorkItem] = []
+        # The final sampled token is returned without another KV write.
+        kv_tokens = prompt_len + max(0, output_limit - 1)
 
-        for item in items:
-            query_len = item.query_len
+        return (
+            kv_tokens + self.kv_block_size - 1
+        ) // self.kv_block_size
 
-            if item.work_class is WorkClass.PREFILL:
-                query_len = min(
-                    query_len,
-                    self._max_prefill_tokens(
-                        item,
-                        remaining_blocks,
-                    ),
+
+    def _admission_candidates(self) -> list[tuple[RequestState, int]]:
+        remaining_blocks = self._block_manager.pool.num_blocks
+
+        for request_id in self._slot_request_ids:
+            if request_id is not None:
+                request = self._requests[request_id]
+
+                remaining_blocks -= self._request_block_demand(
+                    len(request.prompt_token_ids),
+                    request.sampling,
                 )
 
-            if query_len <= 0:
-                continue
+        candidates: list[tuple[RequestState, int]] = []
+        free_slots = iter(self._free_slots())
+        request_slot = next(free_slots, None)
 
-            if query_len != item.query_len:
-                request = self._requests[item.request_id]
-                item = self._make_work_item(
-                    request,
-                    item.request_slot,
-                    item.work_class,
-                    query_len,
-                )
+        for request_id in self._waiting_ids:
+            if request_slot is None:
+                break
 
-            append = BlockAppend(
-                request_id=item.request_id,
-                token_start=item.token_start,
-                query_len=item.query_len,
+            request = self._requests[request_id]
+            demand = self._request_block_demand(
+                len(request.prompt_token_ids),
+                request.sampling,
             )
-            new_blocks = self._block_manager.required_new_blocks(append)
 
-            if new_blocks > remaining_blocks:
+            if demand > remaining_blocks:
                 continue
 
-            selected.append(item)
-            remaining_blocks -= new_blocks
+            candidates.append((request, request_slot))
+            remaining_blocks -= demand
+            request_slot = next(free_slots, None)
 
-        if not selected:
-            return []
-
-        free_slots = self._free_slots()
-        compacted: list[WorkItem] = []
-
-        for item in selected:
-            request = self._requests[item.request_id]
-
-            if request.status is RequestStatus.WAITING:
-                item = self._make_work_item(
-                    request,
-                    next(free_slots),
-                    item.work_class,
-                    item.query_len,
-                )
-
-            compacted.append(item)
-
-        return compacted
+        return candidates
+            
 
     def _make_work_item(
         self,
@@ -961,6 +914,9 @@ class Scheduler:
             request.cancel_requested = True
             return
 
+        if request.status is RequestStatus.PENDING:
+            self._stale_arrivals += 1
+
         for queue in (
             self._waiting_ids,
             self._prefill_ids,
@@ -1017,19 +973,49 @@ class Scheduler:
             now_ns,
         )
 
+
+    def _is_live_arrival(
+        self,
+        entry: tuple[int, int, int],
+    ) -> bool:
+        _, submit_seq, request_id = entry
+        request = self._requests.get(request_id)
+
+        return (
+            request is not None
+            and request.status is RequestStatus.PENDING
+            and request.submit_seq == submit_seq
+        )
+
+
+    def _compact_arrivals(self) -> None:
+        if (
+            self._stale_arrivals < 64
+            or self._stale_arrivals * 2 < len(self._pending_arrivals)
+        ):
+            return
+
+        self._pending_arrivals = [
+            entry
+            for entry in self._pending_arrivals
+            if self._is_live_arrival(entry)
+        ]
+        heapify(self._pending_arrivals)
+        self._stale_arrivals = 0
+
+
     def _promote_arrivals(self, now_ns: int) -> None:
         while (
             self._pending_arrivals
             and self._pending_arrivals[0][0] <= now_ns
         ):
-            _, _, request_id = heappop(self._pending_arrivals)
-            request = self._requests.get(request_id)
+            entry = heappop(self._pending_arrivals)
 
-            if request is None:
+            if not self._is_live_arrival(entry):
+                self._stale_arrivals -= 1
                 continue
 
-            if request.status is not RequestStatus.PENDING:
-                continue
+            request = self._requests[entry[2]]
 
             if request.sampling.max_new_tokens == 0:
                 request.admitted_ns = now_ns

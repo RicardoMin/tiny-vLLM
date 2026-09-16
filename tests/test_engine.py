@@ -334,13 +334,16 @@ def test_generation_stays_within_total_model_length(prompt_len):
     assert not engine.has_unfinished()
 
 
-def test_completion_cannot_be_cancelled_and_id_cannot_be_reused():
+def test_completed_request_cannot_be_cancelled_and_id_can_be_reused():
     engine = make_engine()
     request_id = engine.submit((1,), SamplingParams(max_new_tokens=1))
     engine.step(now_ns=0)
     assert not engine.cancel(request_id)
+    assert engine.submit(
+        (2,), SamplingParams(max_new_tokens=1), request_id=request_id,
+    ) == request_id
     with pytest.raises(ValueError, match="duplicate"):
-        engine.submit((1,), SamplingParams(), request_id=request_id)
+        engine.submit((3,), SamplingParams(max_new_tokens=1), request_id=request_id)
 
 
 def test_default_eos_policy_is_immutable():
@@ -414,11 +417,8 @@ def test_all_irrecoverable_step_failures_close_ownership(point, monkeypatch):
     manager = engine.scheduler.block_manager
     assert manager.free_block_count == manager.pool.num_blocks
     assert manager.pool.open_reservation_count == 0
-    for request_id in engine.scheduler.request_ids:
-        request = engine.scheduler.get_request(request_id)
-        assert request.active_slot is None
-        assert request.inflight_plan_id is None
-        assert manager.block_table(request_id) == ()
+    assert not engine.scheduler.request_ids
+    assert not engine.has_unfinished()
     for txn in captured:
         if txn.state is not TxnState.COMMITTED:
             assert txn.state is TxnState.FAILED

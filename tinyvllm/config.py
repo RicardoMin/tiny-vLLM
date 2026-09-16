@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -19,6 +20,8 @@ class EngineConfig:
     max_num_seqs: int = 64
     max_num_batched_tokens: int = 4096
     gpu_memory_utilization: float = 0.9
+    kv_block_size: int = 16
+    kv_cache_memory_bytes: int = 2 * 1024**3
 
     prefill_chunk_size: int = 512
     prefill_reserve_tokens: int = 128
@@ -38,15 +41,28 @@ class EngineConfig:
             "max_num_seqs",
             "max_num_batched_tokens",
             "prefill_chunk_size",
+            "kv_block_size",
+            "kv_cache_memory_bytes",
         ):
             _check_positive_int(name, getattr(self, name))
+
         for name in (
             "prefill_reserve_tokens",
             "prefill_reserve_requests",
         ):
             _check_non_negative_int(name, getattr(self, name))
 
-        if not 0.0 < self.gpu_memory_utilization < 1.0:
+        utilization = self.gpu_memory_utilization
+
+        if type(utilization) not in (int, float):
+            raise TypeError(
+                "GPU memory utilization must be a number"
+            )
+
+        if (
+            not math.isfinite(utilization)
+            or not 0.0 < utilization < 1.0
+        ):
             raise ValueError("gpu_memory utilization must be between 0 and 1")
 
         tokens = self.prefill_reserve_tokens
