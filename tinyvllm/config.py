@@ -63,7 +63,7 @@ class EngineConfig:
             not math.isfinite(utilization)
             or not 0.0 < utilization < 1.0
         ):
-            raise ValueError("gpu_memory utilization must be between 0 and 1")
+            raise ValueError("GPU memory utilization must be between 0 and 1")
 
         tokens = self.prefill_reserve_tokens
         requests = self.prefill_reserve_requests

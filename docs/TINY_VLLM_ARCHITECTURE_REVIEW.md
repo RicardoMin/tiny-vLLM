@@ -1,6 +1,6 @@
-> 2026-09-15 状态更新：用户 P1 已提交175975c。当前全仓审计见 ARCHITECTURE_AUDIT_20260915.md，
-> P2-A实现契约见 MODULE_P2A_ADMISSION.md；以下P1以前的状态描述作为历史理由保留。
-> P2-A采用保守逻辑准入与显式KV字节预算，自动profile定容留P2-B。助手验证不代表用户已复现。
+> 2026-09-16 状态更新：用户 P2-A 已提交ad7c81c，生产执行器统一命名Executor。
+> P2-B1测量契约见 MODULE_P2B_MEASUREMENT.md，助手已验证，待用户复现；以下为历史审查。
+> 真实负载allocator峰值已可测量；自动KV定容、跨形状数值验收和框架对标仍待后续完成。
 
 # tiny-vLLM 架构复查
 

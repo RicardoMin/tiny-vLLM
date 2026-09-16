@@ -1,6 +1,6 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-15；用户 P1 已提交 175975c，助手 P2-A 已验证，待用户按窗口教程复现。
+更新：2026-09-16；用户 P2-A 已提交 ad7c81c；助手 P2-B1 已验证，待用户按窗口教程复现。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -81,16 +81,27 @@ Engine.from_config接通dtype/EOS/块几何，采用显式KV字节预算(默认2
 该上限不代表运行时activation/Graph峰值保证；自动profile定容进入P2-B，避免增加特制生产attention模拟器。
 保守准入可降低实际提前EOS负载的并发；保证有限工作负载完成，不宣称持续到达时无饥饿。P5再用重计算与公平性提高利用率。
 
-## P2-B：基线、数值契约与 profile
+## P2-B1：本地基准回放与测量（本轮）
 
-基准协议和 nano 固定版本现在即可准备；P1 端到端可运行后开始同条件实测。
+见MODULE_P2B_MEASUREMENT.md。复用Engine.step事件，不向推理热路径加入计时分支。
+按预定arrival计算TTFT，以step返回后的host单调时钟观测token；保存完整token IDs和时间，
+核对completion完整序列及EOS/长度语义。记录ITL、每请求TPOT、E2E、submit lag与吞吐，
+每轮独立nearest-rank p50/p95，不平均percentile。
+benchmark executor包装器在dispatch后execute前记录KV block高水位；真实负载前后同步，
+记录PyTorch allocator baseline/peak与完整KV池分配。无每step额外CUDA同步。
+内容hash包含Git index与实际文件，workload固定LF及hash；报告实际packages/模型hash/config。
+P2-A名称统一为Executor；移除unused bootstrap import，修复shutdown计数器和拼写。
+
+## P2-B2：数值契约、对标适配与性能归因（下一阶段）
+
+在P2-B1观测基础上扩展负载矩阵与nano固定版本适配器；正式框架比较尚未完成。
 先明确 BF16 与不同 batch/后端间允许的数值漂移及采样稳定性标准；不能用当前两个短
 prompt 或同计算形状的位级一致结果代替跨负载数值验收。
 清理重复校验、无用 metadata 与兼容层，保留公共语义。
 负载包含长 prefill、稳定 decode、混合长短请求、逐级并发、open-loop 到达；重复前缀
 单列并说明双方 prefix caching 设置。报告 TTFT/ITL/TPOT p50/p95、tokens/s、完成率、
 KV 峰值内存。可持续并发须给定延迟 SLO、到达率和窗口，不能只比 max_active_requests。
-说明 cold/warm、预热、重复运行分布和失败情况，定位 CPU/GPU 实际瓶颈后再优化。
+说明 cold/warm、预热、重复运行分布和失败情况，定位 CPU/GPU 实际瓶颈后再优化。P2-B1的显存profile只覆盖所跑负载，自动KV定容须另做峰值/余量实验；不能根据一个短smoke推算全配置安全容量。
 
 ## P3：有证据的性能 backend
 

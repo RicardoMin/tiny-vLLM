@@ -714,7 +714,7 @@ class Scheduler:
 
 
     def shutdown(self) -> None:
-        """Permanently stop scheduling and dicard all KV ownership."""
+        """Permanently stop scheduling and discard all KV ownership."""
         self._failed = True
         txn = self._open_txn
 
@@ -730,6 +730,7 @@ class Scheduler:
         self._requests.clear()
         self._completion_events.clear()
         self._pending_arrivals.clear()
+        self._stale_arrivals = 0
         self._waiting_ids.clear()
         self._prefill_ids.clear()
         self._decode_ids.clear()

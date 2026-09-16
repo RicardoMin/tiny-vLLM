@@ -28,7 +28,7 @@ def _plan_kv_blocks(
 
     if not 0.0 < utilization < 1.0:
         raise ValueError(
-            "GPU memory utilization must be betwwen 0 and 1"
+            "GPU memory utilization must be between 0 and 1"
         )
 
     num_blocks = requested_bytes // bytes_per_block
@@ -40,17 +40,17 @@ def _plan_kv_blocks(
     allocated_bytes = num_blocks * bytes_per_block
     used_bytes = total_bytes - free_bytes
 
-    avaliable_bytes = min(
+    available_bytes = min(
         free_bytes,
         int(total_bytes * utilization) - used_bytes,
     )
 
-    if allocated_bytes > avaliable_bytes:
+    if allocated_bytes > available_bytes:
         raise ValueError(
             f"KV allocation needs {allocated_bytes} bytes, but only "
-            f"{max(0, avaliable_bytes)} bytes remain below the GPU usage "
+            f"{max(0, available_bytes)} bytes remain below the GPU usage "
             "ceiling after model loading. Lower kv_cache_memory_bytes "
-            "or free device momory."
+            "or free device memory."
         )
 
     return num_blocks

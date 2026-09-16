@@ -6,7 +6,7 @@ import importlib.metadata as metadata
 import json
 import os
 import platform
-import re
+import re, stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,30 +23,100 @@ def fingerprint(value: object) -> str:
     data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(data).hexdigest()
 
-
 def run_git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
-        env={**os.environ, "LC_ALL" : "C"},
+        env={**os.environ, "LC_ALL": "C"},
         text=True,
+        errors="surrogateescape",
         capture_output=True,
         timeout=15,
         check=False,
     )
+
     if result.returncode:
         raise RuntimeError(result.stderr.strip())
+
     return result.stdout.strip()
 
 
+def _git_bytes(repo: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, "LC_ALL": "C"},
+        capture_output=True,
+        timeout=15,
+        check=True,
+    )
+
+    return result.stdout
+
+
 def git_identity(repo: Path) -> dict:
-    status = run_git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    top = _git_bytes(
+        repo,
+        "rev-parse",
+        "--show-toplevel",
+    ).removesuffix(b"\n")
+
+    repo = Path(os.fsdecode(top))
+
+    status = run_git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+
+    index = _git_bytes(repo, "ls-files", "--stage", "-z")
+    paths = _git_bytes(
+        repo,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    )
+
+    files = []
+
+    for name in sorted(set(paths.split(b"\0")) - {b""}):
+        path = repo / os.fsdecode(name)
+
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            entry = {"kind": "missing"}
+        else:
+            if stat.S_ISLNK(mode):
+                entry = {
+                    "kind": "symlink",
+                    "target": os.fsencode(os.readlink(path)).hex(),
+                }
+            elif stat.S_ISREG(mode):
+                entry = {
+                    "kind": "file",
+                    "executable": bool(mode & stat.S_IXUSR),
+                    "sha256": sha256_file(path),
+                }
+            else:
+                raise ValueError(
+                    f"cannot fingerprint submodule or special file: {path}"
+                )
+
+        files.append({"path": name.hex(), **entry})
+
     return {
         "commit": run_git(repo, "rev-parse", "HEAD"),
         "dirty": bool(status),
         "status_sha256": fingerprint(status) if status else None,
+        "worktree_sha256": fingerprint({
+            "index_sha256": hashlib.sha256(index).hexdigest(),
+            "files": files,
+        }),
     }
-
 
 def packages() -> list[dict]:
     result = []

@@ -8,7 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "safetensors>=0.5,<0.6",
-    "torch>=2.6,<2.7",
+    "torch>=2.9,<2.10",
     "transformers>=4.51,<4.52",
 ]
 

@@ -3,9 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING ,Protocol
-
-from tinyvllm import bootstrap
+from typing import TYPE_CHECKING, Protocol
 
 from tinyvllm._validation import (
     _check_non_negative_int,
