@@ -15,6 +15,7 @@ from benchmarks.tools.collect_env import (
     sha256_file,
 )
 from benchmarks.tools.measurement import ExecutionProbe, replay
+from benchmarks.tools.profiling import capture_cuda
 from benchmarks.tools.validate_workload import strict_json, validate
 from tinyvllm.config import EngineConfig
 from tinyvllm.engine import Engine
@@ -41,6 +42,11 @@ def main():
     parser.add_argument("--max-num-batched-tokens", type=int, default=128)
     parser.add_argument("--prefill-chunk-size", type=int, default=64)
     parser.add_argument("--kv-cache-mib", type=int, default=512)
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="mark a diagnostic run and capture its first measured replay",
+    )
 
     args = parser.parse_args()
 
@@ -76,6 +82,7 @@ def main():
     report = {
         "schema_version": "tinyvllm.benchmark.v1",
         "status": "running",
+        "purpose": "diagnostic" if args.profile else "benchmark",
         "protocol": {
             "arrival": "open_loop_due_submit_at_step_boundaries",
             "token_clock": "host_monotonic_after_step_return",
@@ -86,6 +93,7 @@ def main():
             "repeats": args.repeats,
             "seed_per_request": args.seed,
             "prefill_reservation": "disabled",
+            "cuda_capture_repeat": 0 if args.profile else None,
         },
         "identity": {
             "repo": git_identity(repo),
@@ -167,7 +175,21 @@ def main():
             torch.cuda.reset_peak_memory_stats(device)
             probe.reset()
 
-            result = replay(engine, records, seed=args.seed)
+            capturing = args.profile and repeat == 0
+            probe.nvtx = capturing
+
+            try:
+                with capture_cuda(capturing, device):
+                    result = replay(
+                        engine,
+                        records,
+                        seed=args.seed,
+                        nvtx=capturing,
+                    )
+            finally:
+                probe.nvtx = False
+
+            result["cuda_capture_requested"] = capturing
 
             torch.cuda.synchronize(device)
             peak = torch.cuda.max_memory_allocated(device)

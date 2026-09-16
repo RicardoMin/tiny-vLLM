@@ -4,6 +4,8 @@ import math
 import time
 from collections import Counter
 
+from benchmarks.tools.profiling import nvtx_range
+
 from tinyvllm.request import RequestStatus, SamplingParams
 
 
@@ -28,6 +30,7 @@ class ExecutionProbe:
         self.executor = executor
         self.pool = pool
         self.capabilities = executor.capabilities
+        self.nvtx = False
         self.reset()
 
     def reset(self):
@@ -40,7 +43,10 @@ class ExecutionProbe:
         self.peak_used_blocks = max(self.peak_used_blocks, used)
         self.steps_by_mode[batch.mode.name] += 1
 
-        return self.executor.execute(batch)
+        name = f"tinyvllm/execute/{batch.mode.name.lower()}"
+
+        with nvtx_range(name, self.nvtx):
+            return self.executor.execute(batch)
 
     def release(self, request_id):
         self.executor.release(request_id)
@@ -54,6 +60,7 @@ def replay(
     records,
     *,
     seed=0,
+    nvtx=False,
     clock=time.monotonic_ns,
     sleep=time.sleep,
 ):
@@ -133,8 +140,9 @@ def replay(
 
             continue
 
-        events = engine.step()
-        observed = clock() - origin
+        with nvtx_range("tinyvllm/step", nvtx):
+            events = engine.step()
+            observed = clock() - origin
 
         if observed < last_observed:
             raise RuntimeError("benchmark clock moved backwards")

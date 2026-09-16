@@ -1,6 +1,6 @@
-> 2026-09-16 状态更新：用户 P2-A 已提交ad7c81c，生产执行器统一命名Executor。
-> P2-B1测量契约见 MODULE_P2B_MEASUREMENT.md，助手已验证，待用户复现；以下为历史审查。
-> 真实负载allocator峰值已可测量；自动KV定容、跨形状数值验收和框架对标仍待后续完成。
+> 2026-09-16状态：用户P2-B1已提交9271c8d，基准报告已审查。
+> 本轮Nsight标记与捕获教程见MODULE_P2C_NSYS.md；用户要求完整GPU采集稍后进行。
+> 以下为历史审查；最新有效路线见TINY_VLLM_V1_REFACTOR_PLAN.md。
 
 # tiny-vLLM 架构复查
 

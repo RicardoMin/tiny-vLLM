@@ -1,6 +1,6 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-16；用户 P2-A 已提交 ad7c81c；助手 P2-B1 已验证，待用户按窗口教程复现。
+更新：2026-09-16；用户 P2-B1 已提交 9271c8d；助手 P2-B2 已完成CPU验证，用户要求完整GPU采集稍后进行。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -81,7 +81,7 @@ Engine.from_config接通dtype/EOS/块几何，采用显式KV字节预算(默认2
 该上限不代表运行时activation/Graph峰值保证；自动profile定容进入P2-B，避免增加特制生产attention模拟器。
 保守准入可降低实际提前EOS负载的并发；保证有限工作负载完成，不宣称持续到达时无饥饿。P5再用重计算与公平性提高利用率。
 
-## P2-B1：本地基准回放与测量（本轮）
+## P2-B1：本地基准回放与测量（已完成）
 
 见MODULE_P2B_MEASUREMENT.md。复用Engine.step事件，不向推理热路径加入计时分支。
 按预定arrival计算TTFT，以step返回后的host单调时钟观测token；保存完整token IDs和时间，
@@ -92,7 +92,17 @@ benchmark executor包装器在dispatch后execute前记录KV block高水位；真
 内容hash包含Git index与实际文件，workload固定LF及hash；报告实际packages/模型hash/config。
 P2-A名称统一为Executor；移除unused bootstrap import，修复shutdown计数器和拼写。
 
-## P2-B2：数值契约、对标适配与性能归因（下一阶段）
+## P2-B2：Nsight Systems与可解释的时间线（本轮）
+
+见MODULE_P2C_NSYS.md。只在benchmark侧增加可选NVTX与cudaProfilerApi capture。
+默认不调用NVTX/profiler CUDA API；仅第0个measurement回放捕获，预热和权重加载排除。
+measurement/step/execute-mode三级范围；静态标签不加入request id或变动shape。
+observed时间仍紧跟step返回，位于NVTX pop之前；没有逐step额外同步。
+异常时尝试drain与stop，保留原始错误。profile报告标diagnostic，不能用于正式端到端对比。
+新增可重复长短混合profile负载16/128/256/512，各生成16，max_model_len使用1024。
+用户要求本轮先交付教程，完整GPU采集待续；中断的partial trace只验证接线，不作瓶颈归因。
+
+## P2-B3：数值契约、对标适配与性能归因（后续）
 
 在P2-B1观测基础上扩展负载矩阵与nano固定版本适配器；正式框架比较尚未完成。
 先明确 BF16 与不同 batch/后端间允许的数值漂移及采样稳定性标准；不能用当前两个短

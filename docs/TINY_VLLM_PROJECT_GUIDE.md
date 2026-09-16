@@ -7,14 +7,16 @@
 单GPU、当前dense Qwen3，学习简洁高性能推理框架。目标是在相同条件下改善相对nano-vLLM的TTFT、TPOT、吞吐、显存及可持续并发，并与vLLM/SGLang比较；代码量不显著增加。
 不擅自改成单项快10%或接受数倍代码量。目前没有完成框架间性能比较，不能声称领先。
 
-- 用户源码：WSL /home/ricardo/project/tiny-vllm，main，P2-A已提交ad7c81c，EagerExecutor已改名Executor。
-- 助手工作区：WSL /home/ricardo/project/tiny-vllm-codex，main；P2-B1测量模块已实现并验证，待用户按教程复现。
+- 用户源码：WSL /home/ricardo/project/tiny-vllm，main，P2-B1已提交9271c8d，生产执行器名Executor。
+- 助手工作区：WSL /home/ricardo/project/tiny-vllm-codex，main；P2-B2 Nsight标记/控制已完成CPU验证，待用户复现；用户要求GPU完整采集稍后进行。
 - 模型：/home/ricardo/models/Qwen3/Qwen3-0.6B；权重不进Git。
 - 环境：PyTorch2.9.1+cu128、Transformers4.51.3、RTX5060Laptop；本轮pyproject对齐torch2.9系列；旧L4/cu124锁仅为历史环境，不能用于本机重建；runner保存实际packages与模型文件hash。
 - P1全局分页KV reference已完成。模型每batch一次forward，各层仍逐请求gather+SDPA，直接分页kernel未完成。
 - P2-A：逻辑容量准入、入口限制、活跃ID/远期堆、独占generate、失败资源释放、显式KV字节预算与Engine.from_config。
 
 - P2-B1：逐token观测、open-loop回放、完整结果验收、CUDA/KV峰值和源码内容身份；见MODULE_P2B_MEASUREMENT.md。
+
+- P2-B2：Nsight Systems 2026.1.3已在WSL用户目录配置；捕获首测量轮、静态NVTX阶段和混合profile负载；见MODULE_P2C_NSYS.md。
 
 ## 协作规则
 
@@ -29,7 +31,8 @@
 
 - TINY_VLLM_V1_REFACTOR_PLAN.md：路线与职责。
 - ARCHITECTURE_AUDIT_20260915.md：175975c全仓审计、复现证据和对标。
-- MODULE_P2B_MEASUREMENT.md：本模块测量口径、验证与后续边界。
+- MODULE_P2C_NSYS.md：当前Nsight教程、实际采集状态和用户结果解读。
+- MODULE_P2B_MEASUREMENT.md：已完成的测量口径、验证与后续边界。
 - MODULE_P2A_ADMISSION.md：已完成的容量/生命周期/预算契约。
 - MODULE_P1_PAGED_REFERENCE.md、MODULE_P0_BLOCK_POOL.md、MODULE_REPO_CLEANUP.md：历史模块记录。
 - P1_NUMERICAL_ATTRIBUTION.md：BF16归因及尚未关闭的跨计算形状数值问题。
