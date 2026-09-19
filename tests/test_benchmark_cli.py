@@ -22,12 +22,14 @@ def test_bootstrap_failure_is_reported_and_reraised(tmp_path, monkeypatch, failu
         "run_tiny", "--model", str(tmp_path),
         "--workload", str(root / "benchmarks/workloads/smoke-synth-qwen3-v1.json"),
         "--output", str(output),
+        "--attention-backend", "cuda",
     ])
     monkeypatch.setattr(run_tiny, "git_identity", lambda path: {})
     monkeypatch.setattr(run_tiny, "model_manifest", lambda path: {})
     monkeypatch.setattr(run_tiny, "packages", lambda: [])
 
     def fail(config):
+        assert config.attention_backend == "cuda"
         raise failure
 
     monkeypatch.setattr(run_tiny.Engine, "from_config", fail)
@@ -37,3 +39,4 @@ def test_bootstrap_failure_is_reported_and_reraised(tmp_path, monkeypatch, failu
     assert report["status"] == status
     assert report["phase"] == "bootstrap"
     assert report["runs"] == []
+    assert report["config"]["attention_backend"] == "cuda"

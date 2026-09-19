@@ -98,6 +98,7 @@ def test_bootstrap_aligns_model_scheduler_and_executor(
     config = EngineConfig(
         model=tmp_path,
         dtype="float16",
+        attention_backend="cuda",
         kv_block_size=8,
         kv_cache_memory_bytes=MiB,
     )
@@ -120,6 +121,7 @@ def test_bootstrap_aligns_model_scheduler_and_executor(
         block_size=8,
         num_blocks=1,
         max_model_len=config.max_model_len,
+        attention_backend="cuda",
     )
     assert engine.executor is executor_factory.return_value
     assert engine.scheduler.kv_block_size == 8

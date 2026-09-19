@@ -16,6 +16,7 @@ DType = Literal["bfloat16", "float16"]
 class EngineConfig:
     model: Path
     dtype: DType = "bfloat16"
+    attention_backend: Literal["reference", "cuda"] = "reference"
     max_model_len: int = 4096
     max_num_seqs: int = 64
     max_num_batched_tokens: int = 4096
@@ -35,6 +36,11 @@ class EngineConfig:
             raise ValueError(f"model directory does not exist: {model}")
         if self.dtype not in ("bfloat16", "float16"):
             raise ValueError(f"unsupported dtype: {self.dtype}")
+
+        if self.attention_backend not in ("reference", "cuda"):
+            raise ValueError(
+                f"unsupported attention backend: {self.attention_backend}"
+            )
 
         for name in (
             "max_model_len",

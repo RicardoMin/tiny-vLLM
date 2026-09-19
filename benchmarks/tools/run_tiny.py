@@ -37,6 +37,11 @@ def main():
         choices=("bfloat16", "float16"),
         default="bfloat16",
     )
+    parser.add_argument(
+        "--attention-backend",
+        choices=("reference", "cuda"),
+        default="reference",
+    )
     parser.add_argument("--max-model-len", type=int, default=512)
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-num-batched-tokens", type=int, default=128)
@@ -68,6 +73,7 @@ def main():
     config = EngineConfig(
         model=args.model,
         dtype=args.dtype,
+        attention_backend=args.attention_backend,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,

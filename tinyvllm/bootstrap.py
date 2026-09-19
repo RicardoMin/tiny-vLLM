@@ -131,6 +131,7 @@ def create_engine(config: EngineConfig) -> Engine:
         block_size=config.kv_block_size,
         num_blocks=num_blocks,
         max_model_len=config.max_model_len,
+        attention_backend=config.attention_backend,
     )
 
     return Engine(scheduler, executor)

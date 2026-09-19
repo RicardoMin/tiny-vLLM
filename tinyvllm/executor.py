@@ -130,12 +130,14 @@ class Executor:
         num_blocks: int,
         max_model_len: int | None = None,
         sampler: TorchSampler | None = None,
+        attention_backend: str = "reference",
     ) -> None:
         self.runner = ModelRunner(
             model,
             block_size=block_size,
             num_blocks=num_blocks,
             max_model_len=max_model_len,
+            attention_backend=attention_backend,
         )
 
         self.capabilities = ExecutorCapabilities(

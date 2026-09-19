@@ -1,12 +1,14 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-16；用户 P2-B1 已提交 9271c8d；助手 P2-B2 已完成CPU验证，用户要求完整GPU采集稍后进行。
+更新：2026-09-16；用户 P2-B2 已提交 fa202b6，成功完成真实 Nsight 采集。
+当前交付 P3-A 手写 CUDA C++ 直接分页单 query attention 教程；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
 
 Batch=1 使用统一 batch 契约，当前只支持 dense Qwen3。追求简洁代码以及相对
 nano-vLLM 的 TTFT、TPOT、吞吐和可持续并发全面改善；性能结论限于实测条件。
+自定义算子优先采用CUDA C++满足用户学习目标，GEMM等继续使用成熟库，并允许评估FlashInfer等成熟attention实现；不把CUDA语言本身视为性能收益，不要求为替换语言而重写所有算子。
 
 ```text
 Engine -> Scheduler + BlockManager -> StepPlan + BlockPlanTxn
@@ -92,7 +94,7 @@ benchmark executor包装器在dispatch后execute前记录KV block高水位；真
 内容hash包含Git index与实际文件，workload固定LF及hash；报告实际packages/模型hash/config。
 P2-A名称统一为Executor；移除unused bootstrap import，修复shutdown计数器和拼写。
 
-## P2-B2：Nsight Systems与可解释的时间线（本轮）
+## P2-B2：Nsight Systems与可解释的时间线（已完成）
 
 见MODULE_P2C_NSYS.md。只在benchmark侧增加可选NVTX与cudaProfilerApi capture。
 默认不调用NVTX/profiler CUDA API；仅第0个measurement回放捕获，预热和权重加载排除。
@@ -100,11 +102,13 @@ measurement/step/execute-mode三级范围；静态标签不加入request id或�
 observed时间仍紧跟step返回，位于NVTX pop之前；没有逐step额外同步。
 异常时尝试drain与stop，保留原始错误。profile报告标diagnostic，不能用于正式端到端对比。
 新增可重复长短混合profile负载16/128/256/512，各生成16，max_model_len使用1024。
-用户要求本轮先交付教程，完整GPU采集待续；中断的partial trace只验证接线，不作瓶颈归因。
+用户已成功采集 .local/profiles/20260916-183722/tiny.nsys-rep，25步包含9个mixed。
+该成功记录与此前中断的partial trace分开。现有短负载只作诊断，不作为完整v1性能结论。
 
-## P2-B3：数值契约、对标适配与性能归因（后续）
+## P2-B3：随模块的数值门禁与 v1 对标准备
 
-在P2-B1观测基础上扩展负载矩阵与nano固定版本适配器；正式框架比较尚未完成。
+现有测量基础已足够支持核心开发。每个性能模块补必要数值对照与局部A/B；
+完整负载矩阵、nano适配和多框架排名放到v1收口，不作为推进P3的串行前置任务。
 先明确 BF16 与不同 batch/后端间允许的数值漂移及采样稳定性标准；不能用当前两个短
 prompt 或同计算形状的位级一致结果代替跨负载数值验收。
 清理重复校验、无用 metadata 与兼容层，保留公共语义。
@@ -113,11 +117,41 @@ prompt 或同计算形状的位级一致结果代替跨负载数值验收。
 KV 峰值内存。可持续并发须给定延迟 SLO、到达率和窗口，不能只比 max_active_requests。
 说明 cold/warm、预热、重复运行分布和失败情况，定位 CPU/GPU 实际瓶颈后再优化。P2-B1的显存profile只覆盖所跑负载，自动KV定容须另做峰值/余量实验；不能根据一个短smoke推算全配置安全容量。
 
-## P3：有证据的性能 backend
+## P3：直接分页 attention 数据面
 
-候选为 varlen prefill、kernel 按表直接读取的 paged decode、Triton KV store；之后
-评估 decode CUDA Graph、融合算子和 metadata 复用。选型依据硬件、数值与维护成本。
-每项优化有 reference 对照、开关实验、端到端指标和生产代码增量。
+P3-A（当前教程）：保持Engine/Scheduler/BlockManager/统一模型forward不变。
+按query_len==1选择直接分页kernel，包含decode和单token prefill；多token query继续SDPA。
+SingleQueryMetadata仅传被选请求的query行、压紧block表/offset和有效context长度，
+跨所有层复用；不为这些请求展开read_slots。每层统一写KV后读取，尾块mask必须覆盖表读取。
+一CTA/请求/query head，显式实现线程分工、warp归约和共享内存同步；分段执行FP32 online softmax。
+最终CUDA优化保留原接口与精度策略：二次幂页使用shift/mask、P/V分为8组并行累计、
+对齐时使用16B加载及共享内存float4搬运，实际D128采用编译特化和K/V 8-token预取；
+其他head维度、非二次幂页和未对齐地址保留通用安全路径。这是CUDA Core实现，不是自写Tensor Core kernel。
+P乘V前转为输入dtype，FP32累加后写回原dtype。这是显式精度策略，不承诺位级复现FlashAttention。
+显式reference/cuda配置，默认reference供数值和A/B基线；不自动吞异常回退。
+Python loader按需编译paged_decode.cu并注册torch.ops；选择cuda时构造阶段完成编译，
+避免在首个计量step引入编译工作。CPU/reference不编译扩展。kernel使用设备guard和当前CUDA stream，
+检查host可见的shape/dtype/device/stride，不逐层读取GPU索引值或新增全局同步。
+CUDA BF16/FP16，当前支持head_dim<=256、整数GQA分组；SingleQueryMetadata契约不变。
+本机使用隔离的CUDA Toolkit12.8.93匹配torch cu128，系统13.2不变；g++14/gcc14、MAX_JOBS=1、
+TORCH_CUDA_ARCH_LIST=12.0为当前RTX5060本地构建设置。分发包包含.cu源码，打包检查已通过。
+kernel对独立FP32 oracle，整模型对同flat-batch reference；不把新门禁混称HF质量门禁。
+test_cuda_decode.py/test_cuda_model.py替换原test_triton_*，保留host张量契约和current-stream/event测试；
+新增block_size3/head_dim80、head_dim129和storage_offset1未对齐张量三项数值case，未放宽原阈值。
+最终CUDA常规281 passed/22 skipped，GPU专项27 passed，真实7步11采样行重新通过原预算，
+max row mean_abs=.045703、max_abs=.281250、max TV=.018456、greedy11/11。
+本机9个shape的算子中位耗时均低于旧Triton候选；五轮交替短混合负载中位吞吐为reference86.77、
+旧Triton95.27、最终CUDA98.27 tok/s，仍不是完整框架对标。最初较慢CUDA基线仅归档为历史。
+FlashInfer0.3.1 FA2 Tensor Core候选mean_abs=.066726>.06，CUDA Core候选TV=.027327>.02，
+虽局部快但原整模型门禁未通过，本轮不引入项目依赖；这不等于判定FlashInfer实现错误。
+本轮检查的FlashAttention官方main paged KV接口要求页大小为256的倍数，不能直接套入当前16-token页。
+后续成熟库接入仍需通过相同数值与性能验收，不为候选库放宽本轮预算。
+详见MODULE_P3A_PAGED_DECODE.md。这一版未做split-KV/GQA共享加载，不保证长上下文最优。
+
+P3-B：优化多token prefill/chunked prefill的attention，评估成熟varlen/paged backend；
+覆盖历史位置offset和混合批，保持同一模型路径。结合KV store kernel消除重复写入launch。
+若decode长上下文出现并行度瓶颈，再添加有明确收益的split-KV；不先堆所有优化。
+本阶段后才可称prefill/decode均具备直接分页性能backend；两阶段都保留reference对照。
 
 ## P4/P5 与 v1 收口
 

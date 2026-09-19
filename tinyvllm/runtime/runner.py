@@ -6,7 +6,7 @@ from torch import nn
 from tinyvllm._validation import _check_positive_int
 from tinyvllm.batch import PreparedBatch
 from tinyvllm.paged_kv import PagedKVCache
-from tinyvllm.runtime.attention import ReferenceAttention
+from tinyvllm.runtime.attention import select_attention_backend
 from tinyvllm.runtime.contracts import ModelInput
 
 
@@ -20,8 +20,14 @@ class ModelRunner:
         block_size: int,
         num_blocks: int,
         max_model_len: int | None = None,
+        attention_backend: str = "reference"
     ) -> None:
         self.model = model.eval()
+        self.attention_type = select_attention_backend(
+            attention_backend,
+            model,
+        )
+        self.paged_decode = attention_backend == "cuda"
         parameter = next(self.model.parameters())
         self.device = parameter.device
         config = model.config
@@ -131,8 +137,12 @@ class ModelRunner:
 
         # All value/range checks happen on CPU, before transfers or KV writes.
         self._validate(batch, cache)
-        model_input = ModelInput.from_prepared_batch(batch, device=self.device)
-        attention = ReferenceAttention(batch, model_input, cache)
+        model_input = ModelInput.from_prepared_batch(
+            batch, 
+            device=self.device,
+            paged_decode=self.paged_decode,
+        )
+        attention = self.attention_type(batch, model_input, cache)
         hidden = self.model(model_input.input_ids, model_input.positions, attention=attention)
 
         if batch.num_samples == 0:

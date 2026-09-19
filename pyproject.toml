@@ -12,8 +12,12 @@ dependencies = [
     "transformers>=4.51,<4.52",
 ]
 
+[project.optional-dependencies]
+kernels = ["ninja>=1.11", "setuptools>=75"]
 [tool.setuptools.packages.find]
 include = ["tinyvllm*"]
+[tool.setuptools.package-data]
+"tinyvllm.kernels" = ["*,cu"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
