@@ -1,17 +1,17 @@
 # tiny-vLLM 项目入口与协作约定
 
-更新：2026-09-16。以 TINY_VLLM_V1_REFACTOR_PLAN.md 为架构路线；审计证据见 ARCHITECTURE_AUDIT_20260915.md。
+更新：2026-09-19。以 TINY_VLLM_V1_REFACTOR_PLAN.md 为架构路线；审计证据见 ARCHITECTURE_AUDIT_20260915.md。
 
 ## 目标与状态
 
 单GPU、当前dense Qwen3，学习简洁高性能推理框架。目标是在相同条件下改善相对nano-vLLM的TTFT、TPOT、吞吐、显存及可持续并发，并与vLLM/SGLang比较；代码量不显著增加。
 不擅自改成单项快10%或接受数倍代码量。目前没有完成框架间性能比较，不能声称领先。
 
-- 用户源码：WSL /home/ricardo/project/tiny-vllm，main，P2-B2已提交fa202b6，生产执行器名Executor。
+- 用户源码：WSL /home/ricardo/project/tiny-vllm，main，P3-A已提交8653e1f，生产执行器名Executor。
 - 助手工作区：WSL /home/ricardo/project/tiny-vllm-codex，main；P3-A改用手写CUDA C++直接分页单query attention，用户源码通过窗口教程复现。
 - 模型：/home/ricardo/models/Qwen3/Qwen3-0.6B；权重不进Git。
 - 环境：PyTorch2.9.1+cu128、Transformers4.51.3、RTX5060Laptop；本轮pyproject对齐torch2.9系列；旧L4/cu124锁仅为历史环境，不能用于本机重建；runner保存实际packages与模型文件hash。
-- P1全局分页KV reference已完成。P3-A改用显式cuda后端，单query直接读分页KV，多query仍gather+SDPA；默认reference。用户仅开始修改contracts.py，后续源码尚未实施，read_slots类型需包含None。
+- P1全局分页KV reference已完成。P3-A改用显式cuda后端，单query直接读分页KV，多query仍gather+SDPA；默认reference。2026-09-19核对用户已完成P3-A提交；P3-B1实现和验证在助手副本，用户待复现。
 - 算子学习路线采用CUDA C++，便于理解线程、warp、共享内存、同步和访存；GEMM等继续使用成熟库，也允许评估FlashInfer等成熟attention实现。CUDA与Triton都生成GPU代码，语言选择本身不保证更快，收益须按同条件A/B验收。
 - 编译工具链：本机隔离安装CUDA Toolkit 12.8.93于/home/ricardo/.local/cuda-12.8，匹配PyTorch cu128；原系统13.2保持不变。构建使用CXX=g++-14、CC=gcc-14、MAX_JOBS=1、TORCH_CUDA_ARCH_LIST=12.0；这些是当前RTX5060开发配置，不写死为所有设备支持范围。
 - P3-A通过Python loader编译paged_decode.cu并注册torch.ops，显式选择cuda时在构造阶段按需加载；kernel使用PyTorch当前CUDA stream。CPU/reference无需编译CUDA扩展。
@@ -20,7 +20,7 @@
 - P2-B1：逐token观测、open-loop回放、完整结果验收、CUDA/KV峰值和源码内容身份；见MODULE_P2B_MEASUREMENT.md。
 
 - P2-B2：用户已成功采集20260916-183722 trace；见MODULE_P2C_NSYS.md。
-- 推进顺序：P3-A直接分页单query → P3-B多query attention/KV store → P4融合/metadata/Graph → P5调度与复用 → v1接口收口和完整多框架对标。数值门禁随实现推进。
+- 推进顺序：P3-A直接分页单query → P3-B1融合KV Store/首段Prefill去Gather → P3-B2带历史多query attention → P4融合/metadata/Graph → P5调度与复用 → v1接口收口和完整多框架对标。数值门禁随实现推进。
 
 ## 协作规则
 
@@ -53,7 +53,21 @@ P3-A CUDA性能优化已在助手工作区完成：常规281 passed/22 skipped�
 真实7步11采样行保持原预算，max row mean_abs=.045703、max_abs=.281250、max TV=.018456，greedy11/11。
 最终kernel在本机9个测量shape的中位耗时均低于旧Triton候选；同引擎五轮交替短混合负载中位吞吐
 reference86.77、旧Triton95.27、最终CUDA98.27 tok/s。只说明当前测量条件，不宣称已超过nano-vLLM/vLLM/SGLang。
-本轮性能代码相对上一版CUDA仅改paged_decode.cu；接口/metadata/接线不变。用户仍仅开始contracts修改，完整源码按窗口教程实施。
+本轮性能代码相对上一版CUDA仅改paged_decode.cu；接口/metadata/接线不变。此条为P3-A历史记录；用户已提交8653e1f，本轮P3-B1源码按窗口教程实施。
 FlashInfer0.3.1的FA2 Tensor Core和CUDA Core候选局部快但未通过原整模型预算；隔离试验安装未成为项目依赖。
 FlashAttention本轮检查的官方main接口要求paged KV页大小为256的倍数，当前16不能直接接入。详见MODULE_P3A_PAGED_DECODE.md。
 对应测试为test_cuda_decode.py、test_cuda_model.py，替换旧test_triton_*；保留原数值预算，补充host张量契约和非默认stream/event依赖门禁。CUDA源文件已验证能进入分发包，打包通过不等于数值通过。
+
+## P3-B1当前交付
+
+见 MODULE_P3B1_KV_STORE_PREFILL.md。助手已验证融合KV store与首段prefill直接读当前K/V，
+保留reference和带历史chunk的原路径；CudaDecodeAttention更名CudaAttention，配置仍为cuda。
+本轮未改变paged_decode.cu，未合入两个scores实验。修复用户package-data拼写。
+常规282 passed/46 skipped，GPU组合52 passed；本地微基准改善，整引擎噪声大，不宣称稳定吞吐收益。
+测试和文档迁移到用户仓库不表示用户框架源码已实施。本轮源码基线为用户8653e1f及实际文件。
+
+## 面试资料沉淀约定
+
+Windows工作区 ai-infra-interview/README.md 是入口，Paged Decode专题已完成，不重复。
+发现值得沉淀的亮点时先简述理由；只有用户明确同意才创建或扩写专题。普通模块不必写成简历。
+区分实现、验证、实验和计划；算子/整引擎结果分开，不凭语言或指令宽度推导性能。

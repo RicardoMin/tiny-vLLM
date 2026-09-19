@@ -34,7 +34,10 @@ def load_paged_decode() -> None:
 
     load(
         name="tinyvllm_paged_decode",
-        sources=[str(Path(__file__).with_suffix(".cu"))],
+        sources=[
+            str(Path(__file__).with_suffix(".cu")),
+            str(Path(__file__).with_name("kv_store.cu")),
+        ],
         extra_cuda_cflags=["-O3", "-lineinfo"],
         is_python_module=False,
     )
@@ -49,7 +52,7 @@ def paged_decode_attention(
     *,
     scale: float,
 ) -> None:
-    """File selected query rows on PyTorch's current CUDA stream."""
+    """Fill selected query rows on PyTorch's current CUDA stream."""
     load_paged_decode()
 
     torch.ops.tinyvllm_cuda.paged_decode(

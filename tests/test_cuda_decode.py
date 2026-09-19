@@ -110,8 +110,8 @@ def test_multi_query_only_batch_has_no_single_query_metadata():
     data = ModelInput.from_prepared_batch(batch, device="cpu", paged_decode=True)
 
     assert data.kv.decode is None
-    assert all(slots is not None for slots in data.kv.read_slots)
-    assert [slots.numel() for slots in data.kv.read_slots] == [17, 5, 2]
+    assert [slots.numel() if slots is not None else None
+            for slots in data.kv.read_slots] == [17, 5, None]
 
 
 def test_attention_backend_config_is_explicit_and_reference_is_default(tmp_path):

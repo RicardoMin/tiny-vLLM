@@ -108,10 +108,11 @@ def _run_pair(
                 expected_reads = [
                     (layer, length)
                     for layer in range(model.config.num_hidden_layers)
-                    for query_len, length in zip(
+                    for before, query_len, length in zip(
+                        batch.context_lens_before,
                         batch.query_lens, batch.context_lens_after,
                     )
-                    if query_len > 1
+                    if before > 0 and query_len > 1
                 ]
                 assert read_sizes == expected_reads
 

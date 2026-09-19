@@ -44,28 +44,51 @@ class ReferenceAttention:
         *,
         scale: float,
     ) -> torch.Tensor:
-        self.cache.write(layer_idx, self.kv.slot_mapping, k, v)
+        self._write_kv(layer_idx, k, v)
 
         output = torch.empty_like(q)
-        self._attend(layer_idx, q, output, scale=scale)
+        self._attend(layer_idx, q, k, v, output, scale=scale)
 
         return output
+
+
+    def _write_kv(
+        self,
+        layer_idx: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        self.cache.write(
+            layer_idx,
+            self.kv.slot_mapping,
+            k,
+            v,
+        )
 
 
     def _attend(
         self,
         layer_idx: int,
         q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
         output: torch.Tensor,
         *,
         scale: float,
     ) -> None:
         for index, slots in enumerate(self.kv.read_slots):
-            if slots is None:
+            if slots is None and self.batch.query_lens[index] == 1:
                 continue
 
             start, end = self.batch.q_offsets[index:index + 2]
-            keys, values = self.cache.read(layer_idx, slots)
+
+            if slots is None:
+                keys, values = k[start:end], v[start:end]
+            else:
+                keys, values = self.cache.read(
+                    layer_idx,
+                    slots,
+                )
 
             attended = F.scaled_dot_product_attention(
                 q[start:end].transpose(0, 1).unsqueeze(0),
@@ -83,18 +106,36 @@ class ReferenceAttention:
             )
 
 
-class CudaDecodeAttention(ReferenceAttention):
-    """One-token queries read pages directly; longer queries use reference SDPA."""
+class CudaAttention(ReferenceAttention):
+    """Fused KV writes, direct paged decode and gather-free fresh prefill."""
+
+    def _write_kv(
+        self,
+        layer_idx: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        from tinyvllm.kernels.kv_store import store_kv
+
+        store_kv(
+            self.cache,
+            layer_idx,
+            self.kv.slot_mapping,
+            k,
+            v,
+        )
 
     def _attend(
         self,
         layer_idx: int,
         q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
         output: torch.Tensor,
         *,
         scale: float,
     ) -> None:
-        super()._attend(layer_idx, q, output, scale=scale)
+        super()._attend(layer_idx, q, k, v, output, scale=scale)
 
         if self.kv.decode is not None:
             from tinyvllm.kernels.paged_decode import paged_decode_attention
@@ -144,4 +185,4 @@ def select_attention_backend(name: str, model: torch.nn.Module):
 
     load_paged_decode()
 
-    return CudaDecodeAttention
+    return CudaAttention

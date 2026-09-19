@@ -1,7 +1,7 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-16；用户 P2-B2 已提交 fa202b6，成功完成真实 Nsight 采集。
-当前交付 P3-A 手写 CUDA C++ 直接分页单 query attention 教程；助手验证与用户实施分别记录。
+更新：2026-09-19；用户 P3-A 已提交 8653e1f。
+当前交付 P3-B1 融合KV写入与首段Prefill去Gather；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -119,7 +119,7 @@ KV 峰值内存。可持续并发须给定延迟 SLO、到达率和窗口，不�
 
 ## P3：直接分页 attention 数据面
 
-P3-A（当前教程）：保持Engine/Scheduler/BlockManager/统一模型forward不变。
+P3-A（用户已提交）：保持Engine/Scheduler/BlockManager/统一模型forward不变。
 按query_len==1选择直接分页kernel，包含decode和单token prefill；多token query继续SDPA。
 SingleQueryMetadata仅传被选请求的query行、压紧block表/offset和有效context长度，
 跨所有层复用；不为这些请求展开read_slots。每层统一写KV后读取，尾块mask必须覆盖表读取。
@@ -148,10 +148,18 @@ FlashInfer0.3.1 FA2 Tensor Core候选mean_abs=.066726>.06，CUDA Core候选TV=.0
 后续成熟库接入仍需通过相同数值与性能验收，不为候选库放宽本轮预算。
 详见MODULE_P3A_PAGED_DECODE.md。这一版未做split-KV/GQA共享加载，不保证长上下文最优。
 
-P3-B：优化多token prefill/chunked prefill的attention，评估成熟varlen/paged backend；
-覆盖历史位置offset和混合批，保持同一模型路径。结合KV store kernel消除重复写入launch。
+P3-B1（本轮助手已验证、用户待复现）：融合K/V store成一次launch；无历史且多query的
+首段Prefill直接读本轮K/V，省去read_slots和cache gather。参考backend、历史chunk的offset
+mask与decode算法保持原状；类名CudaAttention覆盖写入/prefill/decode职责。
+slot范围/唯一性由Runner CPU边界验证，kernel结构检查与source/cache storage隔离。
+验证常规282 passed/46 skipped、GPU52 passed及wheel源文件。实模沿用固定预算。
+微基准改善，短整引擎A/B噪声明显，无稳定整引擎收益结论。见MODULE_P3B1_KV_STORE_PREFILL.md。
+
+P3-B2（下一模块）：优化有历史的多token/chunked prefill attention，评估成熟
+varlen/paged/Tensor Core backend与16-token页适配；覆盖历史位置offset、GQA和混合批。
+继续同一模型路径，保留reference；通过固定数值预算后再比较收益和代码复杂度。
+只有P3-B2也落地直接分页路径后，才称prefill/decode均具备直接分页性能backend。
 若decode长上下文出现并行度瓶颈，再添加有明确收益的split-KV；不先堆所有优化。
-本阶段后才可称prefill/decode均具备直接分页性能backend；两阶段都保留reference对照。
 
 ## P4/P5 与 v1 收口
 

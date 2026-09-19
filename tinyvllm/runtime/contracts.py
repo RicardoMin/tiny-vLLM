@@ -71,8 +71,17 @@ class ModelInput:
         read_slots = []
         query_rows, block_ids, table_offsets, context_lens = [], [], [0], []
         reference_tables = None
-        if not paged_decode or any(length > 1 for length in batch.query_lens):
-            reference_tables = torch.tensor(batch.kv_block_table_ids, **kwargs)
+        if not paged_decode or any(
+            before > 0 and query_len > 1
+            for before, query_len in zip(
+                batch.context_lens_before,
+                batch.query_lens,
+            )
+        ):
+            reference_tables = torch.tensor(
+                batch.kv_block_table_ids,
+                **kwargs,
+            )
 
         for index, length in enumerate(batch.context_lens_after):
             first, last = batch.kv_block_table_offsets[index: index + 2]
@@ -83,6 +92,9 @@ class ModelInput:
                 block_ids.extend(table)
                 table_offsets.append(len(block_ids))
                 context_lens.append(length)
+                read_slots.append(None)
+            elif paged_decode and batch.context_lens_before[index] == 0:
+                # Fresh multi-query prefill reads this forward's K/V.
                 read_slots.append(None)
             else:
                 # Reference prefill still gathers history in logical order.

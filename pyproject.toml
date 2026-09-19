@@ -17,7 +17,7 @@ kernels = ["ninja>=1.11", "setuptools>=75"]
 [tool.setuptools.packages.find]
 include = ["tinyvllm*"]
 [tool.setuptools.package-data]
-"tinyvllm.kernels" = ["*,cu"]
+"tinyvllm.kernels" = ["*.cu"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
