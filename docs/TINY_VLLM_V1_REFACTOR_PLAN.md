@@ -1,7 +1,7 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-19；用户 P3-A 已提交 8653e1f。
-当前交付 P3-B1 融合KV写入与首段Prefill去Gather；助手验证与用户实施分别记录。
+更新：2026-09-20；用户 P3-B1 已提交 bd1c34a。
+当前交付 P3-B2a 带历史Chunk右下因果融合Attention；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -148,17 +148,23 @@ FlashInfer0.3.1 FA2 Tensor Core候选mean_abs=.066726>.06，CUDA Core候选TV=.0
 后续成熟库接入仍需通过相同数值与性能验收，不为候选库放宽本轮预算。
 详见MODULE_P3A_PAGED_DECODE.md。这一版未做split-KV/GQA共享加载，不保证长上下文最优。
 
-P3-B1（本轮助手已验证、用户待复现）：融合K/V store成一次launch；无历史且多query的
+P3-B1（用户已提交bd1c34a）：融合K/V store成一次launch；无历史且多query的
 首段Prefill直接读本轮K/V，省去read_slots和cache gather。参考backend、历史chunk的offset
 mask与decode算法保持原状；类名CudaAttention覆盖写入/prefill/decode职责。
 slot范围/唯一性由Runner CPU边界验证，kernel结构检查与source/cache storage隔离。
 验证常规282 passed/46 skipped、GPU52 passed及wheel源文件。实模沿用固定预算。
 微基准改善，短整引擎A/B噪声明显，无稳定整引擎收益结论。见MODULE_P3B1_KV_STORE_PREFILL.md。
 
-P3-B2（下一模块）：优化有历史的多token/chunked prefill attention，评估成熟
-varlen/paged/Tensor Core backend与16-token页适配；覆盖历史位置offset、GQA和混合批。
-继续同一模型路径，保留reference；通过固定数值预算后再比较收益和代码复杂度。
-只有P3-B2也落地直接分页路径后，才称prefill/decode均具备直接分页性能backend。
+P3-B2a（本轮助手已验证、用户待复现）：torch2.9 causal_lower_right符号偏置，
+结合实际QKV的can_use_flash_attention检测，支持路径使用融合FlashAttention。
+不支持时创建一次原bool mask并跨层复用，reference行为不变。历史KV仍gather。
+不新增依赖、不修改已接受CUDA kernel。常规283 passed/51 skipped，GPU/实模58 passed；
+原固定预算和新长chunk对P3-B1回归通过。见MODULE_P3B2_CHUNK_ATTENTION.md。
+
+P3-B2b（下一阶段）：直接分页的有历史multi-query prefill。隔离FlashInfer0.3.1 FA2
+候选支持当前16-token页并通过原实模门禁（不是此前失败的FI decode候选），长历史局部更快。
+还需收敛workspace/Runner生命周期、CPU int32计划与metadata复用、紧凑query打包成本及依赖方案。
+只有B2b正式落地后，才称prefill/decode均具备直接分页性能backend。
 若decode长上下文出现并行度瓶颈，再添加有明确收益的split-KV；不先堆所有优化。
 
 ## P4/P5 与 v1 收口

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from torch.backends.cuda import SDPAParams, can_use_flash_attention
+from torch.nn.attention.bias import CausalBias, causal_lower_right
 
 from tinyvllm.batch import PreparedBatch
 from tinyvllm.paged_kv import PagedKVCache
@@ -19,21 +21,49 @@ class ReferenceAttention:
         self.batch = batch
         self.kv = model_input.kv
         self.cache = cache
-        self.masks: list[torch.Tensor | None] = []
+        self.masks = [
+            self._make_mask(before, after, query_len)
+            for before, after, query_len in zip(
+                batch.context_lens_before,
+                batch.context_lens_after,
+                batch.query_lens,
+            )
+        ]
 
-        for before, after, query_len in zip(
-            batch.context_lens_before, 
-            batch.context_lens_after, 
-            batch.query_lens,
-        ):
-            mask = None
 
-            if before and query_len > 1:
-                queries = torch.arange(before, after, device=cache.device)
-                keys = torch.arange(after, device=cache.device)
-                mask = (keys[None, :] <= queries[:, None])[None, None]
-            self.masks.append(mask)
+    def _make_mask(
+        self,
+        before: int,
+        after: int,
+        query_len: int,
+    ) -> torch.Tensor | None:
+        if before == 0 or query_len == 1:
+            return None
 
+        queries = torch.arange(
+            before,
+            after,
+            device=self.cache.device,
+        )
+        keys = torch.arange(
+            after,
+            device=self.cache.device,
+        )
+
+        return (
+            keys[None, :] <= queries[:, None]
+        )[None, None]
+
+
+    def _attention_mask(
+        self,
+        index: int,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.masks[index]
+    
 
     def __call__(
         self,
@@ -90,11 +120,20 @@ class ReferenceAttention:
                     slots,
                 )
 
+            query = q[start:end].transpose(0, 1).unsqueeze(0)
+            keys = keys.transpose(0, 1).unsqueeze(0)
+            values = values.transpose(0, 1).unsqueeze(0)
+
             attended = F.scaled_dot_product_attention(
-                q[start:end].transpose(0, 1).unsqueeze(0),
-                keys.transpose(0, 1).unsqueeze(0),
-                values.transpose(0, 1).unsqueeze(0),
-                attn_mask=self.masks[index],
+                query,
+                keys,
+                values,
+                attn_mask=self._attention_mask(
+                    index,
+                    query,
+                    keys,
+                    values,
+                ),
                 dropout_p=0.0,
                 is_causal=self.batch.context_lens_before[index] == 0,
                 scale=scale,
@@ -107,7 +146,50 @@ class ReferenceAttention:
 
 
 class CudaAttention(ReferenceAttention):
-    """Fused KV writes, direct paged decode and gather-free fresh prefill."""
+    """Fused KV writes, paged decode and fused causal chunk attention."""
+
+    def _make_mask(
+        self,
+        before: int,
+        after: int,
+        query_len: int,
+    ) -> torch.Tensor | None:
+        if before == 0 or query_len == 1:
+            return None
+
+        return causal_lower_right(query_len, after)
+
+    def _attention_mask(
+        self,
+        index: int,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> torch.Tensor | None:
+        mask = self.masks[index]
+
+        if isinstance(mask, CausalBias):
+            params = SDPAParams(
+                query,
+                keys,
+                values,
+                None,
+                0.0,
+                False,
+                query.shape[1] != keys.shape[1],
+            )
+
+            if not can_use_flash_attention(params):
+                # Cache one explicit mask instead of materializing it per layer.
+                mask = super()._make_mask(
+                    self.batch.context_lens_before[index],
+                    self.batch.context_lens_after[index],
+                    self.batch.query_lens[index],
+                )
+                self.masks[index] = mask
+
+        return mask
+
 
     def _write_kv(
         self,
@@ -150,8 +232,9 @@ class CudaAttention(ReferenceAttention):
             )
 
 
+
 def select_attention_backend(name: str, model: torch.nn.Module):
-    """Select once at construction; an explicitly requestes backend must work."""
+    """Select once at construction; an explicitly requested backend must work."""
 
     if name == "reference":
         return ReferenceAttention
@@ -180,7 +263,7 @@ def select_attention_backend(name: str, model: torch.nn.Module):
             "query heads must be divisible by KV heads"
         )
 
-    # Compile/load before allocating KV; CPU/reference users need to toolkit.
+    # Compile/load before allocating KV; CPU/reference users need no toolkit.
     from tinyvllm.kernels.paged_decode import load_paged_decode
 
     load_paged_decode()
