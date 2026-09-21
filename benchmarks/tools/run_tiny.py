@@ -39,7 +39,7 @@ def main():
     )
     parser.add_argument(
         "--attention-backend",
-        choices=("reference", "cuda"),
+        choices=("reference", "cuda", "flashinfer"),
         default="reference",
     )
     parser.add_argument("--max-model-len", type=int, default=512)

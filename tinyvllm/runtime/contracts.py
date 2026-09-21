@@ -59,10 +59,14 @@ class ModelInput:
         *,
         device: torch.device | str,
         paged_decode: bool = False,
+        paged_prefill: bool = False,
     ) -> 'ModelInput':
         """Lower an already validated CPU batch once, not once per layer."""
         if not batch.has_kv_metadata or batch.kv_block_size <= 0:
             raise ValueError("model input requires paged KV metadata")
+
+        if paged_prefill and not paged_decode:
+            raise ValueError("paged prefill requires CUDA decode metadata")
 
         kwargs = {
             'dtype': torch.long,
@@ -71,11 +75,15 @@ class ModelInput:
         read_slots = []
         query_rows, block_ids, table_offsets, context_lens = [], [], [0], []
         reference_tables = None
-        if not paged_decode or any(
-            before > 0 and query_len > 1
-            for before, query_len in zip(
-                batch.context_lens_before,
-                batch.query_lens,
+
+        if not paged_decode or ( 
+            not paged_prefill
+            and any(
+                before > 0 and query_len > 1
+                for before, query_len in zip(
+                    batch.context_lens_before,
+                    batch.query_lens,
+                )
             )
         ):
             reference_tables = torch.tensor(
@@ -93,8 +101,10 @@ class ModelInput:
                 table_offsets.append(len(block_ids))
                 context_lens.append(length)
                 read_slots.append(None)
-            elif paged_decode and batch.context_lens_before[index] == 0:
-                # Fresh multi-query prefill reads this forward's K/V.
+            elif paged_decode and (
+                batch.context_lens_before[index] == 0 or paged_prefill
+            ):
+                # Fresh queries use current K/V; paged prefill reads blocks.
                 read_slots.append(None)
             else:
                 # Reference prefill still gathers history in logical order.

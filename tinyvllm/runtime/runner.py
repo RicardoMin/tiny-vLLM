@@ -27,10 +27,13 @@ class ModelRunner:
             attention_backend,
             model,
         )
-        self.paged_decode = attention_backend == "cuda"
+        self.paged_decode = attention_backend != "reference"
+        self.prefill = None
+
         parameter = next(self.model.parameters())
         self.device = parameter.device
         config = model.config
+
         if max_model_len is None:
             max_model_len = config.max_position_embeddings
         _check_positive_int("max_model_len", max_model_len)
@@ -39,15 +42,32 @@ class ModelRunner:
                 "max_model_len exceeds model position capacity"
             )
         self.max_model_len = max_model_len
-        self.kv_cache: PagedKVCache | None = PagedKVCache(
-            num_layers=config.num_hidden_layers,
-            num_blocks=num_blocks,
-            block_size=block_size,
-            num_kv_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            device=self.device,
-            dtype=parameter.dtype,
-        )
+
+        if attention_backend == "flashinfer":
+            from tinyvllm.runtime.prefill import PagedPrefill
+
+            self.prefill = PagedPrefill(
+                config,
+                device=self.device,
+                dtype=parameter.dtype,
+                block_size=block_size,
+            )
+
+        try:
+            self.kv_cache: PagedKVCache | None = PagedKVCache(
+                num_layers=config.num_hidden_layers,
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=config.head_dim,
+                device=self.device,
+                dtype=parameter.dtype,
+            )
+        except Exception:
+            if self.prefill is not None:
+                self.prefill.close()
+
+            raise
 
 
     def _validate(
@@ -141,16 +161,40 @@ class ModelRunner:
             batch, 
             device=self.device,
             paged_decode=self.paged_decode,
+            paged_prefill=self.prefill is not None,
         )
-        attention = self.attention_type(batch, model_input, cache)
-        hidden = self.model(model_input.input_ids, model_input.positions, attention=attention)
+
+        try:
+            if self.prefill is None:
+                attention  = self.attention_type(batch, model_input, cache)
+            else:
+                self.prefill.prepare(batch)
+                attention = self.attention_type(
+                    batch, model_input, cache, self.prefill,
+                )
+
+            hidden = self.model(
+                model_input.input_ids,
+                model_input.positions,
+                attention=attention,
+            )
+        finally:
+            if self.prefill is not None:
+                self.prefill.finish()
 
         if batch.num_samples == 0:
             return None
 
-        return self.model.compute_logits(hidden, model_input.sample_token_indices)
+        return self.model.compute_logits(
+            hidden, model_input.sample_token_indices,
+        )
 
 
     def clear(self) -> None:
         # Fail-stop disposal. Ordinary request completion only recyles blocks.
-        self.kv_cache = None
+        try:
+            if self.prefill is not None:
+                self.prefill.close()
+        finally:
+            self.prefill = None
+            self.kv_cache = None

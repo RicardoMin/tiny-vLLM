@@ -17,6 +17,7 @@ def _plan_kv_blocks(
     utilization: float,
     requested_bytes: int,
     bytes_per_block: int,
+    reserved_bytes: int = 0,
 ) -> int:
     """Fit an explicit KV allocation under the device usage ceiling."""
 
@@ -31,6 +32,9 @@ def _plan_kv_blocks(
             "GPU memory utilization must be between 0 and 1"
         )
 
+    if reserved_bytes < 0:
+        raise ValueError("reserved bytes must be nonnegative")
+
     num_blocks = requested_bytes // bytes_per_block
     if num_blocks == 0:
         raise ValueError(
@@ -43,13 +47,14 @@ def _plan_kv_blocks(
     available_bytes = min(
         free_bytes,
         int(total_bytes * utilization) - used_bytes,
-    )
+    ) - reserved_bytes
 
     if allocated_bytes > available_bytes:
         raise ValueError(
             f"KV allocation needs {allocated_bytes} bytes, but only "
             f"{max(0, available_bytes)} bytes remain below the GPU usage "
-            "ceiling after model loading. Lower kv_cache_memory_bytes "
+            f"ceiling after model loading and reserving {reserved_bytes} backend bytes."
+            "Lower kv_cache_memory_bytes "
             "or free device memory."
         )
 
@@ -105,12 +110,26 @@ def create_engine(config: EngineConfig) -> Engine:
         * (torch.finfo(dtype).bits // 8)
     )
 
+    reserved_bytes = 0
+
+    if config.attention_backend == "flashinfer":
+        from tinyvllm.runtime.prefill import PREFILL_DEVICE_BYTES
+
+        compact_bytes = (
+            2 * config.max_num_batched_tokens
+            * model_config.num_attention_heads * model_config.head_dim
+            * (torch.finfo(dtype).bits // 8)
+        )
+
+        reserved_bytes = PREFILL_DEVICE_BYTES + compact_bytes
+
     num_blocks = _plan_kv_blocks(
         total_bytes=total_bytes,
         free_bytes=free_bytes,
         utilization=config.gpu_memory_utilization,
         requested_bytes=config.kv_cache_memory_bytes,
         bytes_per_block=bytes_per_block,
+        reserved_bytes=reserved_bytes,
     )
 
     scheduler = Scheduler(

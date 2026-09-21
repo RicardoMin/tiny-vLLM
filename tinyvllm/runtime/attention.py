@@ -107,7 +107,10 @@ class ReferenceAttention:
         scale: float,
     ) -> None:
         for index, slots in enumerate(self.kv.read_slots):
-            if slots is None and self.batch.query_lens[index] == 1:
+            if slots is None and (
+                self.batch.query_lens[index] == 1
+                or self.batch.context_lens_before[index] > 0
+            ):
                 continue
 
             start, end = self.batch.q_offsets[index:index + 2]
@@ -232,6 +235,31 @@ class CudaAttention(ReferenceAttention):
             )
 
 
+class FlashInferAttention(CudaAttention):
+    """Only historical multi-query rows use the runner-owned paged plan."""
+
+    def __init__(self, batch, model_input, cache, prefill) -> None:
+        super().__init__(batch, model_input, cache)
+        self.prefill = prefill
+
+
+    def _make_mask(self, before, after, query_len):
+        return None
+
+
+    def _attend(
+        self,
+        layer_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        scale: float,
+    ) -> None:
+        super()._attend(layer_idx, q, k, v, output, scale=scale)
+        self.prefill.run(layer_idx, q, self.cache, output, scale=scale)
+
 
 def select_attention_backend(name: str, model: torch.nn.Module):
     """Select once at construction; an explicitly requested backend must work."""
@@ -239,7 +267,7 @@ def select_attention_backend(name: str, model: torch.nn.Module):
     if name == "reference":
         return ReferenceAttention
 
-    if name != "cuda":
+    if name not in ("cuda", "flashinfer"):
         raise ValueError(f"unsupported attention backend: {name}")
 
     parameter = next(model.parameters())
@@ -268,4 +296,4 @@ def select_attention_backend(name: str, model: torch.nn.Module):
 
     load_paged_decode()
 
-    return CudaAttention
+    return FlashInferAttention if name == "flashinfer" else CudaAttention

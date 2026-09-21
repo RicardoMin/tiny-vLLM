@@ -1,7 +1,7 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-20；用户 P3-B1 已提交 bd1c34a。
-当前交付 P3-B2a 带历史Chunk右下因果融合Attention；助手验证与用户实施分别记录。
+更新：2026-09-21；用户 P3-B2a 已提交 7b5e8f9。
+当前交付 P3-B2b 可选的直接分页历史Prefill；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -155,16 +155,21 @@ slot范围/唯一性由Runner CPU边界验证，kernel结构检查与source/cach
 验证常规282 passed/46 skipped、GPU52 passed及wheel源文件。实模沿用固定预算。
 微基准改善，短整引擎A/B噪声明显，无稳定整引擎收益结论。见MODULE_P3B1_KV_STORE_PREFILL.md。
 
-P3-B2a（本轮助手已验证、用户待复现）：torch2.9 causal_lower_right符号偏置，
+P3-B2a（用户已提交7b5e8f9）：torch2.9 causal_lower_right符号偏置，
 结合实际QKV的can_use_flash_attention检测，支持路径使用融合FlashAttention。
 不支持时创建一次原bool mask并跨层复用，reference行为不变。历史KV仍gather。
 不新增依赖、不修改已接受CUDA kernel。常规283 passed/51 skipped，GPU/实模58 passed；
 原固定预算和新长chunk对P3-B1回归通过。见MODULE_P3B2_CHUNK_ATTENTION.md。
 
-P3-B2b（下一阶段）：直接分页的有历史multi-query prefill。隔离FlashInfer0.3.1 FA2
-候选支持当前16-token页并通过原实模门禁（不是此前失败的FI decode候选），长历史局部更快。
-还需收敛workspace/Runner生命周期、CPU int32计划与metadata复用、紧凑query打包成本及依赖方案。
-只有B2b正式落地后，才称prefill/decode均具备直接分页性能backend。
+P3-B2b（助手已验证、用户待复现）：显式flashinfer混合后端，只有带历史多Query
+使用FI0.3.1 FA2直读page16/D128 KV；自研store/decode和fresh路径不变，默认reference不变。
+Runner-owned planner每step一次CPU int32规划/跨层复用；紧凑Q/O同step跨层复用，历史read_slots不展开。
+plan_done事件保护异步H2D的pinned host缓冲区复用，固定creation stream，close先同步后释放引用。
+预留固定40.125MiB GPU workspace和紧凑Q/O上限；另外8MiB pinned CPU，不是全模型显存硬上限。
+可选依赖FI0.3.1/frontend1.13.0已在当前torch2.9.1+cu128环境验证。常规301/61skip，GPU86。
+原/长chunk实模预算不变；本地长历史局部更快但短整引擎更慢、长整引擎提升小，因此仅显式可选，
+不声称完成性能目标。见MODULE_P3B2B_PAGED_PREFILL.md及原始同条件证据。
+落实后prefill/decode均有直接分页性能backend；32MiB scratch不是任意形状支持承诺。
 若decode长上下文出现并行度瓶颈，再添加有明确收益的split-KV；不先堆所有优化。
 
 ## P4/P5 与 v1 收口

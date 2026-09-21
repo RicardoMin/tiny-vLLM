@@ -26,7 +26,7 @@ def _require_cuda() -> None:
         pytest.skip("CUDA is required")
 
 
-def _runners(model, *, block_size, num_blocks, max_model_len):
+def _runners(model, *, block_size, num_blocks, max_model_len, backend="cuda"):
     runners = tuple(
         ModelRunner(
             model,
@@ -35,7 +35,7 @@ def _runners(model, *, block_size, num_blocks, max_model_len):
             max_model_len=max_model_len,
             attention_backend=backend,
         )
-        for backend in ("reference", "cuda")
+        for backend in ("reference", backend)
     )
     for runner in runners:
         runner.kv_cache.key.fill_(float("nan"))
@@ -114,6 +114,8 @@ def _run_pair(
                     )
                     if before > 0 and query_len > 1
                 ]
+                if cuda.prefill is not None:
+                    expected_reads = []
                 assert read_sizes == expected_reads
 
                 if expected is None:
@@ -158,6 +160,8 @@ def _run_pair(
                     observed_reuse = True
     finally:
         hook.remove()
+        for runner in runners:
+            runner.clear()
     assert observed_reuse
 
 
@@ -286,13 +290,25 @@ def _long_scenario():
     not os.environ.get("TINYVLLM_MODEL"),
     reason="set TINYVLLM_MODEL to local Qwen3 weights for the real model gate",
 )
-def test_real_qwen3_logits_stay_within_fixed_same_shape_budget(monkeypatch):
+@pytest.mark.parametrize("backend", [
+    "cuda",
+    pytest.param(
+        "flashinfer",
+        marks=pytest.mark.skipif(
+            os.environ.get("TINYVLLM_RUN_FLASHINFER") != "1",
+            reason="set TINYVLLM_RUN_FLASHINFER=1 for the optional backend",
+        ),
+    ),
+])
+def test_real_qwen3_logits_stay_within_fixed_same_shape_budget(monkeypatch, backend):
     _require_cuda()
     model = Qwen3ForCausalLM.from_pretrained(
         os.environ["TINYVLLM_MODEL"], device="cuda", dtype=torch.bfloat16,
     )
     manager = BlockManager(block_size=16, num_blocks=14)
-    runners = _runners(model, block_size=16, num_blocks=14, max_model_len=256)
+    runners = _runners(
+        model, block_size=16, num_blocks=14, max_model_len=256, backend=backend,
+    )
     budget = _RealLogitBudget()
     try:
         _run_pair(
@@ -312,7 +328,17 @@ def test_real_qwen3_logits_stay_within_fixed_same_shape_budget(monkeypatch):
     not os.environ.get("TINYVLLM_MODEL"),
     reason="set TINYVLLM_MODEL for the extended chunk regression",
 )
-def test_real_qwen3_long_chunks_against_previous_cuda_attention():
+@pytest.mark.parametrize("backend", [
+    "cuda",
+    pytest.param(
+        "flashinfer",
+        marks=pytest.mark.skipif(
+            os.environ.get("TINYVLLM_RUN_FLASHINFER") != "1",
+            reason="set TINYVLLM_RUN_FLASHINFER=1 for the optional backend",
+        ),
+    ),
+])
+def test_real_qwen3_long_chunks_against_previous_cuda_attention(backend):
     """Isolate the chunk backend change; both runners keep identical decode."""
     from tinyvllm.runtime.attention import CudaAttention, ReferenceAttention
 
@@ -325,8 +351,8 @@ def test_real_qwen3_long_chunks_against_previous_cuda_attention():
     )
     runners = tuple(
         ModelRunner(model, block_size=16, num_blocks=144,
-                    max_model_len=1280, attention_backend="cuda")
-        for _ in range(2)
+                    max_model_len=1280, attention_backend=name)
+        for name in ("cuda", backend)
     )
     runners[0].attention_type = PreviousCudaAttention
     for runner in runners:
