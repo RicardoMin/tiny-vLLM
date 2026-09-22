@@ -179,5 +179,7 @@ class Executor:
 
 
     def clear(self) -> None:
-        self.runner.clear()
-        self.sampler.clear()
+        try:
+            self.runner.clear()
+        finally:
+            self.sampler.clear()

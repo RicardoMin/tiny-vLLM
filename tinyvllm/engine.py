@@ -155,6 +155,7 @@ class Engine:
         self._active_ids = set(scheduler.request_ids)
         self._next_request_id = max(self._active_ids, default=-1) + 1
         self._cancel_queued: set[int] = set()
+        self._closed = False
         self._failed: str | None = None
         self._generating = False
 
@@ -509,7 +510,23 @@ class Engine:
         )
 
 
+    def close(self) -> None:
+        """Permanently dispose resources; pending requests are discarded."""
+        if self._closed:
+            return
+        if self._generating:
+            raise RuntimeError("cannot close while generate() is running")
+
+        self._closed = True
+        error = RuntimeError("engine cleanup failed")
+        self._dispose(error)
+        if getattr(error, "__notes__", None):
+            raise error
+
+
     def _ensure_healthy(self) -> None:
+        if self._closed:
+            raise RuntimeError("engine is closed")
         if self._failed is not None:
             raise RuntimeError(
                 f"engine is failed: {self._failed}"
@@ -521,6 +538,10 @@ class Engine:
     ) -> None:
         # Keep text only: retaining cause would retain its traceback and KV.
         self._failed = f"{type(cause).__name__} : {cause}"
+        self._dispose(cause)
+
+
+    def _dispose(self, cause: BaseException) -> None:
         self._commands.clear()
         self._active_ids.clear()
         self._cancel_queued.clear()

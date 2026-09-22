@@ -191,10 +191,11 @@ class ModelRunner:
 
 
     def clear(self) -> None:
-        # Fail-stop disposal. Ordinary request completion only recyles blocks.
+        # Final resource disposal; ordinary completion only recycles blocks.
         try:
             if self.prefill is not None:
                 self.prefill.close()
         finally:
             self.prefill = None
             self.kv_cache = None
+            self.model = None

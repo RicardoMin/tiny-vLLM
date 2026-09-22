@@ -1,7 +1,7 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-21；用户 P3-B2a 已提交 7b5e8f9。
-当前交付 P3-B2b 可选的直接分页历史Prefill；助手验证与用户实施分别记录。
+更新：2026-09-21；用户 P3-B2b 已提交 5fe1a09。
+当前交付 S1 文本API与CLI；近期以V0_1_DELIVERY_PLAN.md为准；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -161,7 +161,7 @@ P3-B2a（用户已提交7b5e8f9）：torch2.9 causal_lower_right符号偏置，
 不新增依赖、不修改已接受CUDA kernel。常规283 passed/51 skipped，GPU/实模58 passed；
 原固定预算和新长chunk对P3-B1回归通过。见MODULE_P3B2_CHUNK_ATTENTION.md。
 
-P3-B2b（助手已验证、用户待复现）：显式flashinfer混合后端，只有带历史多Query
+P3-B2b（用户已提交5fe1a09）：显式flashinfer混合后端，只有带历史多Query
 使用FI0.3.1 FA2直读page16/D128 KV；自研store/decode和fresh路径不变，默认reference不变。
 Runner-owned planner每step一次CPU int32规划/跨层复用；紧凑Q/O同step跨层复用，历史read_slots不展开。
 plan_done事件保护异步H2D的pinned host缓冲区复用，固定creation stream，close先同步后释放引用。
@@ -172,12 +172,21 @@ plan_done事件保护异步H2D的pinned host缓冲区复用，固定creation str
 落实后prefill/decode均有直接分页性能backend；32MiB scratch不是任意形状支持承诺。
 若decode长上下文出现并行度瓶颈，再添加有明确收益的split-KV；不先堆所有优化。
 
-## P4/P5 与 v1 收口
+## v0.1先形成可用闭环，再按profile推进P4/P5
 
-P4：metadata复用、局部融合、decode Graph、批量采样；每项保留数值对照、消融、端到端收益与代码增量。
-P5：重计算抢占/公平性，在共享前缀纳入正式目标矩阵前完成完整块复用、引用计数和淘汰。
-v1：统一入口、tokenizer/streaming与关闭/背压语义，冻结版本后完整对比nano-vLLM、vLLM、SGLang。
-第二个dense模型用小型ModelSpec/InferenceModel契约检验无需修改Scheduler，不先造大型插件框架。
+用户指出接口缺失，2026-09-21调整优先级：不再把所有性能/调度优化排在HTTP之前。
+近期完整范围与验收以V0_1_DELIVERY_PLAN.md为准；pyproject版本号不代表已正式发布。
+
+S1（当前）：本地Tokenizer、LLM文本批量/chat接口、结构化文本输出、CLI与显式close。
+S2（下一模块）：单GPU owner工作线程、有界命令/输出桥、async请求与取消、错误/关闭通知。
+S3：HTTP非流式与SSE、正确增量detokenize、断连取消、慢消费者背压、明确兼容子集。
+S4：完整核心/服务测试、干净安装、使用文档、可复现nano/vLLM/SGLang能力矩阵和基准。
+v0.1功能发布不等于达到全面性能领先；后者仍为长期目标，不根据本地短样例宣称达标。
+
+P4保留metadata复用、局部融合、decode Graph、批量采样，每项保留数值/消融/端到端收益。
+P5保留重计算抢占/公平性；共享前缀正式入目标矩阵前须完成完整块复用、引用计数和淘汰。
+这些按实测瓶颈穿插，不再全部作为v0.1 HTTP服务发布前置。当前保守准入与有限请求可完成性继续保留。
+第二个dense模型后续用小型ModelSpec/InferenceModel契约检验无需修改Scheduler，不先造大型插件框架。
 
 ## 后续与测试
 

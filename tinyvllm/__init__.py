@@ -15,8 +15,11 @@ from tinyvllm.engine import (
 )
 
 from tinyvllm.config import EngineConfig
+from tinyvllm.llm import LLM, TextOutput
 
 __all__ = [
+    "LLM",
+    "TextOutput",
     "CompletionEvent",
     "EngineConfig",
     "RequestState",
