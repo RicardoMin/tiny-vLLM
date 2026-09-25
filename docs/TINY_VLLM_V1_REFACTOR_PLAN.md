@@ -1,7 +1,7 @@
 # tiny-vLLM v1 架构决策与路线
 
-更新：2026-09-21；用户 P3-B2b 已提交 5fe1a09。
-当前交付 S1 文本API与CLI；近期以V0_1_DELIVERY_PLAN.md为准；助手验证与用户实施分别记录。
+更新：2026-09-23；用户 S1 已提交 5ae8a9b。
+当前交付 S2 owner线程与有界异步token桥；近期以V0_1_DELIVERY_PLAN.md为准；助手验证与用户实施分别记录。
 替代旧 Stage 0–6、独立 block_pool.py 和 fake BlockTable 路线。
 
 ## 固定目标与职责
@@ -195,3 +195,12 @@ TP、量化、speculation 和异步 overlap 在基础数据面稳定后排期；
 测试按 block、attention、runner、engine/scheduler、模型数值组织，不限制五个文件或
 每功能一条；保留 sampling、权重、取消、失败等关键公共语义，删除私有布局绑定与重复。
 助手验证后同步测试/文档，生产源码提供窗口教程，用户在 main 自行复现提交。
+
+## S2服务并发边界（当前模块）
+
+AsyncEngine/RequestStream为传输与生命周期层，不复制请求调度、block所有权或模型执行路径。
+GPU Engine仅在owner线程内创建/使用/销毁；事件循环处理有界slot、通知与消费者。
+一请求最多一个reader；token队列之外保留一个terminal，最终token不会被completion覆盖。
+credits在worker退休且consumer结束时才释放，包含completed-unread。过载拒绝、慢消费失败明确可见。
+consumer退出与服务退出分开：前者请求step边界取消，后者通知等待者并等待owner.close/join。
+此模块只交付token异步流；S3接入S1编码与文本输出、HTTP/SSE，并限制CPU排队。
