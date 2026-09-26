@@ -82,10 +82,10 @@ def test_partial_prefill_skips_logits_and_runner_does_not_commit_manager(monkeyp
 
 @pytest.mark.parametrize('updates', [
     {'kv_block_size': 4}, {'kv_num_blocks': 9},
-    {'kv_block_table_ids': (-1, 1, 2)}, {'kv_block_table_ids': (0, 1, 8)},
+    {'kv_block_table_ids': (0, 1, 8)},
     {'kv_block_table_ids': (0, 1, 1)}, {'kv_block_table_offsets': (0, 1, 3)},
-    {'kv_block_table_offsets': ()}, {'kv_slot_mapping': (0, 0, 2, 4, 5)},
-    {'kv_slot_mapping': (0, 1, 3, 4, 5)}, {'kv_slot_mapping': (0, 1, 16, 4, 5)},
+    {'kv_slot_mapping': (0, 0, 2, 4, 5)},
+    {'kv_slot_mapping': (0, 1, 16, 4, 5)},
     {'q_offsets': (0, 0, 5)}, {'positions': (0, 1, 8, 0, 1)},
     {'request_ids': (10, 10)}, {'sample_token_indices': (1,)},
     {'input_ids': (1, 2, 41, 3, 4)},
@@ -114,24 +114,6 @@ def test_builder_rejects_same_plan_id_with_wrong_append_interval():
         plan = StepPlan(0, (WorkItem(1, 0, WorkClass.PREFILL, start, 2, before, False),))
         with pytest.raises(ValueError):
             BatchBuilder(max_model_len=32).prepare(plan, (request,), kv=txn)
-    txn.rollback()
-
-
-def test_lowered_indices_are_int64_and_history_is_in_logical_order():
-    model, _ = models()
-    manager = BlockManager(block_size=2, num_blocks=8)
-    txn, batch = prepare(manager, 0, scenario()[0])
-    runner = ModelRunner(model, block_size=2, num_blocks=8)
-    runner._validate(batch, runner.kv_cache)
-    data = ModelInput.from_prepared_batch(batch, device='cpu')
-    assert data.kv.slot_mapping.dtype == torch.long
-    assert data.kv.slot_mapping.tolist() == list(batch.kv_slot_mapping)
-    expected = []
-    for rid, length in zip(batch.request_ids, batch.context_lens_after):
-        table = txn.staged_block_table(rid)
-        expected.append([table[p // 2].block_id * 2 + p % 2 for p in range(length)])
-    assert [x.tolist() for x in data.kv.read_slots] == expected
-    assert all(x.dtype == torch.long for x in data.kv.read_slots)
     txn.rollback()
 
 

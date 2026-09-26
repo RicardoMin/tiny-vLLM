@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-import copy
-
 from tinyvllm.batch import (
     BatchBuilder,
     StepResult,
@@ -86,33 +84,6 @@ def running_decode_request() -> RequestState:
         first_token_ns=1,
     )
 
-def test_prefill_only_plan() -> None:
-    plan = StepPlan(1, (prefill_item(),))
-
-    assert plan.mode is StepMode.PREFILL_ONLY
-    assert plan.num_decode_items == 0
-    assert plan.num_prefill_items == 1
-    assert plan.num_query_tokens == 3
-    assert plan.num_samples == 1
-
-
-def test_decode_only_plan() -> None:
-    plan = StepPlan(1, (decode_item(),))
-
-    assert plan.mode is StepMode.DECODE_ONLY
-    assert plan.num_decode_items == 1
-
-
-def test_mixed_plan_is_decode_first() -> None:
-    plan = StepPlan(
-        plan_id=1,
-        items=(decode_item(), prefill_item()),
-    )
-
-    assert plan.mode is StepMode.MIXED
-    assert plan.num_query_tokens == 4
-    assert plan.num_samples == 2
-
 
 def test_plan_rejects_prefill_before_decode() -> None:
     with pytest.raises(ValueError, match="precede"):
@@ -122,46 +93,10 @@ def test_plan_rejects_prefill_before_decode() -> None:
         )
 
 
-def test_builder_flattens_mixed_batch_without_padding() -> None:
-    decode = running_decode_request()
-    prefill = waiting_request(
-        prompt=(21, 22, 23, 24, 25)
-    )
-    before = copy.deepcopy((decode, prefill))
-
-    plan = StepPlan(
-        plan_id=7,
-        items=(
-            decode_item(),
-            prefill_item(should_sample=False),
-        ),
-    )
-
-    batch = BatchBuilder(max_model_len=16).prepare(
-        plan,
-        (decode, prefill),
-    )
-
-    assert batch.mode is StepMode.MIXED
-    assert batch.input_ids == (13, 21, 22, 23)
-    assert batch.positions == (3, 0, 1, 2)
-    assert batch.token_request_slots == (1, 0, 0, 0)
-    assert batch.q_offsets == (0, 1, 4)
-    assert batch.context_lens_before == (3, 0)
-    assert batch.query_lens == (1, 3)
-    assert batch.context_lens_after == (4, 3)
-    assert batch.num_decode_tokens == 1
-
-    # Partial prefill does not produce a sampling row.
-    assert batch.sample_token_indices == (0,)
-    assert batch.sample_request_ids == (2,)
-    assert batch.sampling_params == (decode.sampling,)
-
-    assert (decode, prefill) == before
-
-
 def test_final_prefill_maps_its_last_query_row() -> None:
+    manager = BlockManager(block_size=4, num_blocks=2)
     request = waiting_request()
+    txn = manager.begin_plan(plan_id=8, appends=(BlockAppend(1, 0, 3),))
     plan = StepPlan(
         plan_id=8,
         items=(prefill_item(),),
@@ -170,11 +105,13 @@ def test_final_prefill_maps_its_last_query_row() -> None:
     batch = BatchBuilder(max_model_len=16).prepare(
         plan,
         (request,),
+        kv=txn,
     )
 
     assert batch.sample_token_indices == (2,)
     assert batch.sample_request_ids == (1,)
     assert batch.num_samples == 1
+    txn.rollback()
 
 
 def test_step_result_copies_and_validates_parallel_arrays() -> None:
@@ -211,12 +148,12 @@ def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
     decode = running_decode_request()
     prefill = waiting_request(
         request_id=1,
-        prompt=(21, 22, 23),
+        prompt=(21, 22, 23, 24, 25),
     )
 
     plan = StepPlan(
         plan_id=2,
-        items=(decode_item(), prefill_item()),
+        items=(decode_item(), prefill_item(should_sample=False)),
     )
 
     txn = manager.begin_plan(
@@ -237,6 +174,19 @@ def test_builder_carries_staged_kv_metadata_in_plan_order() -> None:
     decode_id = txn.staged_block_table(2)[0].block_id
     prefill_id = txn.staged_block_table(1)[0].block_id
     assert decode_id != prefill_id
+    assert batch.mode is StepMode.MIXED
+    assert batch.input_ids == (13, 21, 22, 23)
+    assert batch.positions == (3, 0, 1, 2)
+    assert batch.q_offsets == (0, 1, 4)
+    assert batch.context_lens_before == (3, 0)
+    assert batch.query_lens == (1, 3)
+    assert batch.context_lens_after == (4, 3)
+    assert batch.num_decode_tokens == 1
+    assert batch.sample_token_indices == (0,)
+    assert batch.sample_request_ids == (2,)
+    assert batch.sampling_params == (decode.sampling,)
+    assert decode.computed_tokens == 3
+    assert prefill.computed_tokens == 0
     assert batch.has_kv_metadata
     assert batch.kv_block_table_ids == (decode_id, prefill_id)
     assert batch.kv_block_table_offsets == (0, 1, 2)

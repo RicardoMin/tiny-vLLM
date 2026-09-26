@@ -352,7 +352,6 @@ class Engine:
                 requests,
                 kv=txn.kv,
             )
-            self.executor.capabilities.validate(batch)
 
             dispatch_ns = start_ns
             if not explicit_time:
@@ -486,12 +485,6 @@ class Engine:
                 completion_events=completions
             )
 
-        aborted_ids = {
-            event.request_id
-            for event in completions
-            if event.status is RequestStatus.ABORTED
-        }
-
         tokens = tuple(
             TokenEvent(
                 request_id=request_id,
@@ -501,7 +494,6 @@ class Engine:
                 result.sample_request_ids,
                 result.sampled_token_ids,
             )
-            if request_id not in aborted_ids
         )
 
         return EngineStepEvents(

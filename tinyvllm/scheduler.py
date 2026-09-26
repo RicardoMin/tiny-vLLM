@@ -770,16 +770,15 @@ class Scheduler:
         prompt_len: int,
         sampling: SamplingParams,
     ) -> int:
-        if sampling.max_new_tokens == 0:
-            return 0
-
         output_limit = min(
             sampling.max_new_tokens,
             self.max_model_len - prompt_len,
         )
+        if output_limit == 0:
+            return 0
 
         # The final sampled token is returned without another KV write.
-        kv_tokens = prompt_len + max(0, output_limit - 1)
+        kv_tokens = prompt_len + output_limit - 1
 
         return (
             kv_tokens + self.kv_block_size - 1
@@ -911,26 +910,17 @@ class Scheduler:
         if request.terminal:
             return
 
-        if request.inflight_plan_id is not None:
-            request.cancel_requested = True
-            return
-
         if request.status is RequestStatus.PENDING:
             self._stale_arrivals += 1
-
-        for queue in (
-            self._waiting_ids,
-            self._prefill_ids,
-            self._decode_ids,
-        ):
-            try:
-                queue.remove(request.request_id)
-            except ValueError:
-                pass
-
-        if request.active_slot is not None:
-            self._slot_request_ids[request.active_slot] = None
-            request.active_slot = None
+        elif request.status is RequestStatus.WAITING:
+            self._waiting_ids.remove(request.request_id)
+        else:
+            queue = (
+                self._decode_ids
+                if request.work_class is WorkClass.DECODE
+                else self._prefill_ids
+            )
+            queue.remove(request.request_id)
 
         self._terminalize_request(
             request,
@@ -946,7 +936,6 @@ class Scheduler:
         now_ns: int,
     ) -> None:
         request.status = status
-        request.cancel_requested = False
         request.inflight_plan_id = None
         request.finished_ns = now_ns
 
@@ -1018,7 +1007,10 @@ class Scheduler:
 
             request = self._requests[entry[2]]
 
-            if request.sampling.max_new_tokens == 0:
+            if (
+                request.sampling.max_new_tokens == 0
+                or len(request.prompt_token_ids) == self.max_model_len
+            ):
                 request.admitted_ns = now_ns
                 self._finish_request(
                     request,

@@ -10,7 +10,8 @@ import torch
 from benchmarks.tools import profiling, run_tiny
 from benchmarks.tools.measurement import ExecutionProbe, replay
 from tinyvllm.engine import Engine
-from tinyvllm.executor import CpuFakeExecutor, ExecutorCapabilities
+from tinyvllm.executor import ExecutorCapabilities
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.scheduler import Scheduler
 
 
@@ -92,23 +93,6 @@ def test_disabled_helpers_do_not_touch_cuda(monkeypatch):
             pass
 
 
-def test_capture_orders_start_range_drain_and_stop(monkeypatch):
-    events = []
-    stack = record_ranges(monkeypatch, events)
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: events.append("sync"))
-    monkeypatch.setattr(torch.cuda.profiler, "start", lambda: events.append("start"))
-    monkeypatch.setattr(torch.cuda.profiler, "stop", lambda: events.append("stop"))
-
-    with profiling.capture_cuda(True, "cuda:0"):
-        events.append("body")
-
-    assert events == [
-        "sync", "start", ("enter", "tinyvllm/measurement"),
-        "body", ("exit", "tinyvllm/measurement"), "sync", "stop",
-    ]
-    assert stack == []
-
-
 @pytest.mark.parametrize("body_fails", [False, True])
 def test_cleanup_always_stops_and_preserves_first_error(monkeypatch, body_fails):
     events = []
@@ -187,43 +171,6 @@ def test_nvtx_step_and_mode_ranges_preserve_real_engine_results(monkeypatch):
         "tinyvllm/execute/mixed",
         "tinyvllm/execute/decode_only",
     }
-
-
-def test_failed_execute_balances_nested_step_and_execute_ranges(monkeypatch):
-    events = []
-    stack = record_ranges(monkeypatch, events)
-    clock = Clock()
-    engine = fake_engine(clock)
-    failure = RuntimeError("kernel failed")
-
-    def fail(batch):
-        raise failure
-
-    engine.executor.execute = fail
-    probe = ExecutionProbe(engine.executor, engine.scheduler.block_manager.pool)
-    probe.nvtx = True
-    engine.executor = probe
-    records = [{
-        "ordinal": 0,
-        "request_id": "request",
-        "arrival_ns": 0,
-        "prompt_token_ids": [1],
-        "max_new_tokens": 1,
-        "temperature": 0.0,
-        "ignore_eos": True,
-    }]
-
-    with pytest.raises(RuntimeError, match="executor failed") as raised:
-        replay(engine, records, nvtx=True, clock=clock, sleep=clock.sleep)
-
-    assert raised.value.__cause__ is failure
-    assert stack == []
-    assert events == [
-        ("enter", "tinyvllm/step"),
-        ("enter", "tinyvllm/execute/prefill_only"),
-        ("exit", "tinyvllm/execute/prefill_only"),
-        ("exit", "tinyvllm/step"),
-    ]
 
 
 @pytest.mark.parametrize("profile", [False, True])

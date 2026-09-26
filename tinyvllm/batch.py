@@ -105,7 +105,6 @@ class PreparedBatch:
 
     input_ids: tuple[int, ...]
     positions: tuple[int, ...]
-    token_request_slots: tuple[int, ...]
 
     q_offsets: tuple[int, ...]
     context_lens_before: tuple[int, ...]
@@ -183,24 +182,23 @@ class BatchBuilder:
         plan: StepPlan,
         requests: tuple[RequestState, ...],
         *,
-        kv: BlockPlanTxn | None = None,
+        kv: BlockPlanTxn,
     ) -> PreparedBatch:
         if len(requests) != len(plan.items):
             raise ValueError(
                 "requests must align with plan items"
             )
 
-        if kv is not None and kv.plan_id != plan.plan_id:
+        if kv.plan_id != plan.plan_id:
             raise ValueError(
                 "KV plan_id does not match step plan"
             )
 
-        if kv is not None and kv.request_ids != tuple(item.request_id for item in plan.items):
+        if kv.request_ids != tuple(item.request_id for item in plan.items):
             raise ValueError("KV requests must match all plan items in order")
 
         input_ids: list[int] = []
         positions: list[int] = []
-        token_request_slots: list[int] = []
 
         q_offsets = [0]
         context_lens_before: list[int] = []
@@ -212,7 +210,7 @@ class BatchBuilder:
         sampling_params: list[SamplingParams] = []
 
         kv_block_table_ids: list[int] = []
-        kv_block_table_offsets = [0] if kv is not None else []
+        kv_block_table_offsets = [0]
         kv_slot_mapping: list[int] = []
 
         request_ids: list[int] = []
@@ -238,29 +236,23 @@ class BatchBuilder:
                     "token slice length does not match query_len"
                 )
 
-            if kv is not None:
-                if item.context_len_before != item.token_start:
-                    raise ValueError("context length must match append start")
-                kv.validate_append(item.request_id, item.token_start, item.query_len)
-                block_table = kv.staged_block_table(
-                    item.request_id
-                )
-                slot_mapping = kv.slot_mapping(
-                    item.request_id
-                )
+            if item.context_len_before != item.token_start:
+                raise ValueError("context length must match append start")
+            kv.validate_append(item.request_id, item.token_start, item.query_len)
+            block_table = kv.staged_block_table(
+                item.request_id
+            )
+            slot_mapping = kv.slot_mapping(
+                item.request_id
+            )
 
-                if len(slot_mapping) != item.query_len:
-                    raise RuntimeError(
-                        "KV slot mapping length does not match query_len"
-                    )
-
-                kv_block_table_ids.extend(
-                    ref.block_id for ref in block_table
-                )
-                kv_block_table_offsets.append(
-                    len(kv_block_table_ids)
-                )
-                kv_slot_mapping.extend(slot_mapping)
+            kv_block_table_ids.extend(
+                ref.block_id for ref in block_table
+            )
+            kv_block_table_offsets.append(
+                len(kv_block_table_ids)
+            )
+            kv_slot_mapping.extend(slot_mapping)
 
             input_ids.extend(tokens)
             positions.extend(
@@ -268,9 +260,6 @@ class BatchBuilder:
                     item.context_len_before,
                     context_len_after,
                 )
-            )
-            token_request_slots.extend(
-                [item.request_slot] * item.query_len
             )
 
             q_offsets.append(len(input_ids))
@@ -295,7 +284,6 @@ class BatchBuilder:
             num_decode_items=plan.num_decode_items,
             input_ids=tuple(input_ids),
             positions=tuple(positions),
-            token_request_slots=tuple(token_request_slots),
             q_offsets=tuple(q_offsets),
             context_lens_before=tuple(context_lens_before),
             query_lens=tuple(query_lens),
@@ -303,8 +291,8 @@ class BatchBuilder:
             sample_token_indices=tuple(sample_token_indices),
             sample_request_ids=tuple(sample_request_ids),
             sampling_params=tuple(sampling_params),
-            kv_block_size=0 if kv is None else kv.block_size,
-            kv_num_blocks=0 if kv is None else kv.num_blocks,
+            kv_block_size=kv.block_size,
+            kv_num_blocks=kv.num_blocks,
             kv_block_table_ids=tuple(kv_block_table_ids),
             kv_block_table_offsets=tuple(kv_block_table_offsets),
             kv_slot_mapping=tuple(kv_slot_mapping),

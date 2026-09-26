@@ -1,42 +1,18 @@
 from __future__ import annotations
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from tinyvllm.engine import (
-    Engine,
     GenerateRequest,
 )
-from tinyvllm.executor import CpuFakeExecutor
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.request import (
     RequestStatus,
     SamplingParams,
 )
-from tinyvllm.scheduler import Scheduler
-
-
-def make_engine(
-    *,
-    eos_token_ids: tuple[int, ...] | None = None,
-    executor=None,
-) -> Engine:
-    scheduler = Scheduler(
-        max_active_requests=4,
-        max_step_requests=4,
-        max_scheduled_tokens=8,
-        prefill_chunk_size=2,
-        max_model_len=16,
-        prefill_reserve_tokens=1,
-        prefill_reserve_requests=1,
-        kv_block_size=4,
-        kv_num_blocks=16,
-        eos_token_ids=eos_token_ids,
-    )
-
-    return Engine(
-        scheduler,
-        CpuFakeExecutor(token_id=7) if executor is None else executor,
-        clock=lambda: 0,
-    )
+from engine_helpers import make_engine
 
 
 def test_generate_returns_submission_order() -> None:
@@ -73,45 +49,6 @@ def test_generate_returns_submission_order() -> None:
         output.status is RequestStatus.FINISHED
         for output in outputs
     )
-
-
-def test_eos_finishes_request() -> None:
-    engine = make_engine(eos_token_ids=7)
-
-    request_id = engine.submit(
-        (1, 2),
-        SamplingParams(max_new_tokens=8),
-        arrival_ns=0,
-        request_id=1,
-    )
-
-    events = engine.step(now_ns=0)
-
-    assert events.token_events[0].request_id == request_id
-    assert events.token_events[0].token_id == 7
-    assert events.completion_events[0].status is RequestStatus.FINISHED
-    assert events.completion_events[0].output_token_ids == (7,)
-
-
-def test_ignore_eos_continues_until_length() -> None:
-    engine = make_engine(eos_token_ids=7)
-
-    request_id = engine.submit(
-        (1,),
-        SamplingParams(
-            max_new_tokens=2,
-            ignore_eos=True,
-        ),
-        arrival_ns=0,
-        request_id=1,
-    )
-
-    first = engine.step(now_ns=0)
-    second = engine.step(now_ns=1)
-
-    assert first.completion_events == ()
-    assert second.completion_events[0].request_id == request_id
-    assert second.completion_events[0].output_token_ids == (7, 7)
 
 
 def test_cancel_before_dispatch_emits_abort() -> None:
@@ -214,90 +151,6 @@ def test_executor_failure_tears_down_dispatched_state() -> None:
         engine.step(now_ns=1)
 
 
-def test_zero_output_finishes_without_executor_work() -> None:
-    engine = make_engine()
-
-    output = engine.generate(
-        (
-            GenerateRequest(
-                prompt_token_ids=(1,),
-                sampling=SamplingParams(
-                    max_new_tokens=0,
-                ),
-                request_id=9,
-                arrival_ns=0,
-            ),
-        )
-    )[0]
-
-    assert output.status is RequestStatus.FINISHED
-    assert output.output_token_ids == ()
-
-
-def test_secondary_eos_finishes_request() -> None:
-    engine = make_engine(
-        eos_token_ids=(7, 8),
-        executor=CpuFakeExecutor(token_id=8),
-    )
-
-    request_id = engine.submit(
-        (1,),
-        SamplingParams(max_new_tokens=8),
-        arrival_ns=0,
-        request_id=1,
-    )
-
-    events = engine.step(now_ns=0)
-
-    assert events.token_events[0].request_id == request_id
-    assert events.token_events[0].token_id == 8
-    assert events.completion_events[0].status is RequestStatus.FINISHED
-
-
-def test_non_eos_token_continues_with_multiple_eos_ids() -> None:
-    engine = make_engine(
-        eos_token_ids=(7, 8),
-        executor=CpuFakeExecutor(token_id=9),
-    )
-
-    request_id = engine.submit(
-        (1,),
-        SamplingParams(max_new_tokens=2),
-        arrival_ns=0,
-        request_id=1,
-    )
-
-    first = engine.step(now_ns=0)
-    second = engine.step(now_ns=1)
-
-    assert first.completion_events == ()
-    assert second.completion_events[0].request_id == request_id
-    assert second.completion_events[0].output_token_ids == (9, 9)
-
-
-def test_ignore_eos_applies_to_all_eos_ids() -> None:
-    engine = make_engine(
-        eos_token_ids=(7, 8),
-        executor=CpuFakeExecutor(token_id=8),
-    )
-
-    request_id = engine.submit(
-        (1,),
-        SamplingParams(
-            max_new_tokens=2,
-            ignore_eos=True,
-        ),
-        arrival_ns=0,
-        request_id=1,
-    )
-
-    first = engine.step(now_ns=0)
-    second = engine.step(now_ns=1)
-
-    assert first.completion_events == ()
-    assert second.completion_events[0].request_id == request_id
-    assert second.completion_events[0].output_token_ids == (8, 8)
-
 @pytest.mark.parametrize(
     "prompt, kwargs, error",
     [
@@ -322,7 +175,7 @@ def test_invalid_submission_does_not_poison_queue_or_consume_id(prompt, kwargs, 
     assert event.output_token_ids == (7,)
 
 
-@pytest.mark.parametrize("prompt_len", [1, 15, 16])
+@pytest.mark.parametrize("prompt_len", [1, 15])
 def test_generation_stays_within_total_model_length(prompt_len):
     engine = make_engine()
     output, = engine.generate((GenerateRequest(
@@ -332,6 +185,37 @@ def test_generation_stays_within_total_model_length(prompt_len):
     assert output.prompt_token_count + len(output.output_token_ids) == 16
     assert len(output.output_token_ids) == 16 - prompt_len
     assert not engine.has_unfinished()
+
+
+@pytest.mark.parametrize(
+    "prompt_len,max_new_tokens",
+    [(1, 0), (16, 4)],
+)
+def test_zero_output_finishes_without_executing_or_allocating_kv(
+    prompt_len, max_new_tokens,
+):
+    executor = SimpleNamespace(
+        capabilities=CpuFakeExecutor.capabilities,
+        execute=Mock(side_effect=AssertionError("zero-output request executed")),
+        release=Mock(),
+        clear=Mock(),
+    )
+    engine = make_engine(executor=executor, kv_block_size=1, kv_num_blocks=1)
+    try:
+        output, = engine.generate((
+            GenerateRequest((1,) * prompt_len, SamplingParams(
+                max_new_tokens=max_new_tokens,
+            )),
+        ))
+        assert output.output_token_ids == ()
+        assert output.prompt_token_count == prompt_len
+        assert output.status is RequestStatus.FINISHED
+        assert engine.scheduler.block_manager.free_block_count == 1
+        assert not engine.has_unfinished()
+        executor.execute.assert_not_called()
+        executor.release.assert_called_once_with(output.request_id)
+    finally:
+        engine.close()
 
 
 def test_completed_request_cannot_be_cancelled_and_id_can_be_reused():
@@ -344,12 +228,6 @@ def test_completed_request_cannot_be_cancelled_and_id_can_be_reused():
     ) == request_id
     with pytest.raises(ValueError, match="duplicate"):
         engine.submit((3,), SamplingParams(max_new_tokens=1), request_id=request_id)
-
-
-def test_default_eos_policy_is_immutable():
-    engine = make_engine()
-    assert engine.scheduler.eos_token_ids == frozenset()
-    assert isinstance(engine.scheduler.eos_token_ids, frozenset)
 
 
 @pytest.mark.parametrize("point", ["before_dispatch", "after_kv_dispatch", "after_kv_complete", "release_idle", "release_active", "done_clock"])
@@ -469,3 +347,84 @@ def test_cleanup_error_preserves_original_failure_and_clears_executor(monkeypatc
     assert any("secondary cleanup failure" in note for note in caught.value.__cause__.__notes__)
     with pytest.raises(RuntimeError, match="engine is failed"):
         engine.submit((1,), SamplingParams())
+
+@pytest.mark.parametrize(
+    "eos, token, ignore_eos, expected_count",
+    [
+        pytest.param(7, 7, False, 1, id="single-eos"),
+        pytest.param((7, 8), 8, False, 1, id="secondary-eos"),
+        pytest.param((7, 8), 9, False, 2, id="non-eos"),
+        pytest.param((7, 8), 8, True, 2, id="ignore-secondary-eos"),
+    ],
+)
+def test_eos_policy_preserves_complete_event_sequence(eos, token, ignore_eos, expected_count):
+    engine = make_engine(eos_token_ids=eos, executor=CpuFakeExecutor(token_id=token))
+    assert isinstance(engine.scheduler.eos_token_ids, frozenset)
+    if eos is None:
+        assert engine.scheduler.eos_token_ids == frozenset()
+    request_id = engine.submit(
+        (1, 2), SamplingParams(max_new_tokens=2, ignore_eos=ignore_eos),
+        arrival_ns=0, request_id=1,
+    )
+    emitted = []
+    for index in range(expected_count):
+        events = engine.step(now_ns=index)
+        token_event, = events.token_events
+        assert token_event.request_id == request_id
+        emitted.append(token_event.token_id)
+        if index < expected_count - 1:
+            assert events.completion_events == ()
+    completion, = events.completion_events
+    assert completion.request_id == request_id
+    assert completion.status is RequestStatus.FINISHED
+    assert tuple(emitted) == completion.output_token_ids == (token,) * expected_count
+    assert not engine.has_unfinished()
+
+
+def test_close_discards_pending_work_and_attempts_both_cleanup_paths(monkeypatch):
+    engine = make_engine()
+    engine.submit((1, 2), SamplingParams(max_new_tokens=2))
+    engine.submit((3,), SamplingParams(max_new_tokens=1), arrival_ns=100)
+    calls = []
+    shutdown = engine.scheduler.shutdown
+
+    def failed_shutdown():
+        shutdown()
+        calls.append('scheduler')
+        raise RuntimeError('injected scheduler cleanup error')
+
+    class Executor:
+        def clear(self):
+            calls.append('executor')
+
+    monkeypatch.setattr(engine.scheduler, 'shutdown', failed_shutdown)
+    engine.executor = Executor()
+    with pytest.raises(RuntimeError, match='cleanup failed') as captured:
+        engine.close()
+    assert calls == ['scheduler', 'executor']
+    assert engine.scheduler.request_ids == ()
+    assert engine.scheduler.next_arrival_ns is None
+    assert 'scheduler cleanup failed' in captured.value.__notes__[0]
+    assert not engine.has_unfinished()
+    engine.close()
+    with pytest.raises(RuntimeError, match='closed'):
+        engine.step()
+
+
+def test_close_during_generate_is_rejected_without_discarding_the_batch():
+    engine = make_engine()
+    fake = CpuFakeExecutor(token_id=6)
+
+    def execute(batch):
+        with pytest.raises(RuntimeError, match='cannot close'):
+            engine.close()
+        return fake.execute(batch)
+
+    engine.executor = SimpleNamespace(
+        capabilities=fake.capabilities, execute=execute,
+        release=fake.release, clear=fake.clear,
+    )
+    from tinyvllm.engine import GenerateRequest
+
+    assert engine.generate((GenerateRequest((1,), SamplingParams(max_new_tokens=1)),))[0].output_token_ids == (6,)
+    engine.close()

@@ -5,16 +5,13 @@ import sys
 from pathlib import Path
 
 import pytest
-import torch
 
 from benchmarks.tools.validate_workload import canonical
 from benchmarks.tools.collect_env import sha256_file
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or not os.environ.get("TINYVLLM_MODEL"),
-    reason="requires CUDA and TINYVLLM_MODEL",
-)
+@pytest.mark.cuda
+@pytest.mark.model
 def test_real_benchmark_cli_mixed_replay_and_memory(tmp_path):
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "benchmarks/workloads/smoke-synth-qwen3-v1.json").read_text())

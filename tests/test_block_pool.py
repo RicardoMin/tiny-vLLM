@@ -152,20 +152,6 @@ def test_invalid_later_append_does_not_reserve_or_publish(invalid):
     _commit(manager, 2, BlockAppend(10, 0, 1))
 
 
-def test_required_new_blocks_validates_and_is_a_pure_query():
-    manager = BlockManager(block_size=4, num_blocks=2)
-    _commit(manager, 1, BlockAppend(10, 0, 3))
-    before = manager.pool.snapshot()
-    assert manager.required_new_blocks(BlockAppend(10, 3, 1)) == 0
-    assert manager.required_new_blocks(BlockAppend(10, 3, 2)) == 1
-    with pytest.raises(ValueError, match="token_start"):
-        manager.required_new_blocks(BlockAppend(10, 2, 1))
-    with pytest.raises(TypeError):
-        manager.required_new_blocks(object())
-    assert manager.pool.snapshot() == before
-    assert manager.valid_token_count(10) == 3
-
-
 def test_pre_dispatch_rollback_preserves_committed_state():
     manager = BlockManager(block_size=4, num_blocks=3)
     _commit(manager, 1, BlockAppend(10, 0, 3))

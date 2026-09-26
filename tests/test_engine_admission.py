@@ -3,30 +3,15 @@ import weakref
 
 import pytest
 
-from tinyvllm.engine import Engine, GenerateRequest
-from tinyvllm.executor import CpuFakeExecutor, Executor
+from tinyvllm.engine import GenerateRequest
+from tinyvllm.executor import Executor
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.request import RequestStatus, SamplingParams
-from tinyvllm.scheduler import Scheduler
+from engine_helpers import make_engine as _make_engine
 
 
 def make_engine(executor=None, **kwargs):
-    scheduler = Scheduler(
-        max_active_requests=4,
-        max_step_requests=4,
-        max_scheduled_tokens=8,
-        prefill_chunk_size=2,
-        max_model_len=16,
-        prefill_reserve_tokens=1,
-        prefill_reserve_requests=1,
-        kv_block_size=2,
-        kv_num_blocks=32,
-    )
-    return Engine(
-        scheduler,
-        executor or CpuFakeExecutor(token_id=7),
-        clock=kwargs.pop('clock', lambda: 0),
-        **kwargs,
-    )
+    return _make_engine(executor, kv_block_size=2, kv_num_blocks=32, **kwargs)
 
 
 def test_completed_ids_do_not_accumulate_and_explicit_ids_can_be_reused():

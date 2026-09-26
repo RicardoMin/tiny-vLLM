@@ -69,7 +69,12 @@ class TorchSampler:
         params: SamplingParams,
         request_id: int,
     ) -> torch.Tensor:
-        scores = logits.float().div(params.temperature)
+        scores = logits.float()
+
+        if params.temperature < torch.finfo(torch.float32).tiny:
+            scores = scores.double()
+
+        scores = (scores - scores.max()).div(params.temperature)
         candidate_ids: torch.Tensor | None = None
 
         if 0 < params.top_k < scores.numel():

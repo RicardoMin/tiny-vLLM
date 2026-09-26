@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 import torch
@@ -12,10 +11,7 @@ from tinyvllm.kernels.paged_decode import load_paged_decode
 from tinyvllm.paged_kv import PagedKVCache
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("TINYVLLM_RUN_CUDA") != "1" or not torch.cuda.is_available(),
-    reason="requires TINYVLLM_RUN_CUDA=1 and CUDA",
-)
+pytestmark = pytest.mark.cuda
 
 
 @pytest.fixture(scope="module", autouse=True)

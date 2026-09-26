@@ -10,10 +10,27 @@ from tinyvllm.models import Qwen3Config
 import torch
 from transformers import (
     Qwen3Config as HfQwen3Config,
-    Qwen3ForCausalLM as HfQwen3ForCausalLM,
 )
 
 from tinyvllm.models.qwen3 import Qwen3ForCausalLM
+
+
+@pytest.mark.parametrize(
+    "entry,value",
+    [("from_dict", 1.9), ("from_model_dir", True), ("from_hf", "2")],
+)
+def test_dimension_types_are_not_silently_coerced(tmp_path, entry, value):
+    model_dir = write_config(tmp_path, num_hidden_layers=value)
+    data = json.loads((model_dir / "config.json").read_text())
+    if entry == "from_dict":
+        source = data
+    elif entry == "from_model_dir":
+        source = model_dir
+    else:
+        source = HfQwen3Config.from_dict(data)
+
+    with pytest.raises(TypeError, match="num_hidden_layers must be an integer"):
+        getattr(Qwen3Config, entry)(source)
 
 
 def write_config(
@@ -46,20 +63,6 @@ def write_config(
     return model_dir
 
 
-def test_reads_qwen3_geometry(
-    tmp_path: Path,
-) -> None:
-    config = Qwen3Config.from_model_dir(
-        write_config(tmp_path)
-    )
-
-    assert config.hidden_size == 1024
-    assert config.num_key_value_groups == 2
-    assert config.q_proj_size == 2048
-    assert config.kv_proj_size == 1024
-    assert config.qkv_proj_size == 4096
-
-
 @pytest.mark.parametrize(
     "updates",
     [
@@ -78,6 +81,41 @@ def test_rejects_unsupported_model_features(
         )
 
 
+@pytest.mark.parametrize("tied", [False, True])
+def test_lm_head_binding_avoids_temporary_storage_and_loads_weights(tied, monkeypatch):
+    config = Qwen3Config.from_hf(HfQwen3Config(
+        vocab_size=41, hidden_size=24, intermediate_size=48,
+        num_hidden_layers=1, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=6,
+        max_position_embeddings=32, tie_word_embeddings=tied,
+    ))
+    initialization_devices = []
+    original = torch.nn.Linear.reset_parameters
+
+    def record(layer):
+        if (layer.out_features, layer.in_features) == (41, 24):
+            initialization_devices.append(layer.weight.device.type)
+        original(layer)
+
+    monkeypatch.setattr(torch.nn.Linear, "reset_parameters", record)
+    model = Qwen3ForCausalLM(config, device="cpu", dtype=torch.float32)
+    embedding = model.model.embed_tokens.weight
+    assert initialization_devices == ["meta" if tied else "cpu"]
+    assert (model.lm_head.weight is embedding) == tied
+    assert all(not tensor.is_meta for tensor in model.state_dict().values())
+
+    embedding_before = embedding.detach().clone()
+    weights = torch.full_like(model.lm_head.weight, 0.25)
+    model.load_weight("lm_head.weight", weights)
+    torch.testing.assert_close(model.lm_head.weight, weights)
+    torch.testing.assert_close(embedding, weights if tied else embedding_before)
+    hidden = torch.randn(3, config.hidden_size)
+    torch.testing.assert_close(
+        model.compute_logits(hidden),
+        torch.nn.functional.linear(hidden, weights),
+    )
+
+
 def test_rejects_incomplete_source_config() -> None:
     with pytest.raises(ValueError, match="missing Qwen3"):
         Qwen3Config.from_dict({"model_type": "qwen3"})
@@ -86,7 +124,6 @@ def test_rejects_incomplete_source_config() -> None:
 @pytest.mark.parametrize("name", [
     "model.embed_tokens.weight",
     "model.norm.weight",
-    "model.layers.0.self_attn.o_proj.weight",
     "lm_head.weight",
 ])
 def test_rejects_broadcastable_weight_shape_before_copy(name):

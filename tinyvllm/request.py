@@ -84,7 +84,6 @@ class RequestState:
     computed_tokens: int = 0
     active_slot: int | None = None
     inflight_plan_id: int | None = None
-    cancel_requested: bool = False
 
     admitted_ns: int | None = None
     first_token_ns: int | None = None

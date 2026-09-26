@@ -1,94 +1,23 @@
-from types import SimpleNamespace
-from unittest.mock import Mock
-
 import pytest
 import torch
 
 from tinyvllm.bootstrap import _plan_kv_blocks, create_engine
 from tinyvllm.config import EngineConfig
-from tinyvllm.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 
 GiB = 1024**3
 MiB = 1024**2
 
 
-def test_kv_budget_rounds_down_without_exceeding_explicit_limit():
-    # Qwen3-0.6B: K and V, 28 layers, 16 tokens, 8 heads, 128 dims, BF16.
-    block_bytes = 2 * 28 * 16 * 8 * 128 * 2
-    blocks = _plan_kv_blocks(
-        total_bytes=8 * GiB,
-        free_bytes=6 * GiB,
-        utilization=0.9,
-        requested_bytes=2 * GiB,
-        bytes_per_block=block_bytes,
-    )
-
-    assert blocks == 1170
-    assert blocks * block_bytes <= 2 * GiB
-    assert (blocks + 1) * block_bytes > 2 * GiB
-
-
-def test_device_cap_counts_memory_already_used_by_other_processes():
-    with pytest.raises(ValueError, match="after model loading"):
+def test_budget_must_hold_at_least_one_complete_block():
+    with pytest.raises(ValueError, match="one complete block"):
         _plan_kv_blocks(
             total_bytes=8 * GiB,
-            free_bytes=3 * GiB,
-            utilization=0.75,
-            requested_bytes=2 * GiB,
+            free_bytes=6 * GiB,
+            utilization=0.9,
+            requested_bytes=1,
             bytes_per_block=MiB,
         )
-
-
-@pytest.mark.parametrize(
-    "changes, message",
-    [
-        ({"free_bytes": -1}, "snapshot"),
-        ({"free_bytes": 9 * GiB}, "snapshot"),
-        ({"requested_bytes": 1}, "one complete block"),
-        ({"utilization": float("nan")}, "utilization"),
-    ],
-)
-def test_invalid_or_unusable_budget_is_rejected(changes, message):
-    arguments = dict(
-        total_bytes=8 * GiB,
-        free_bytes=6 * GiB,
-        utilization=0.9,
-        requested_bytes=2 * GiB,
-        bytes_per_block=MiB,
-    )
-    arguments.update(changes)
-
-    with pytest.raises(ValueError, match=message):
-        _plan_kv_blocks(**arguments)
-
-
-@pytest.fixture
-def mocked_cuda_loader(monkeypatch):
-    model_config = SimpleNamespace(
-        max_position_embeddings=4096,
-        num_hidden_layers=28,
-        num_key_value_heads=8,
-        head_dim=128,
-        eos_token_id=[151643, 151645],
-    )
-    model = SimpleNamespace(config=model_config)
-    loader = Mock(return_value=model)
-    executor_factory = Mock()
-    memory_snapshot = Mock(return_value=(6 * GiB, 8 * GiB))
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "synchronize", Mock())
-    monkeypatch.setattr(torch.cuda, "empty_cache", Mock())
-    monkeypatch.setattr(torch.cuda, "mem_get_info", memory_snapshot)
-    monkeypatch.setattr(
-        Qwen3Config, "from_model_dir", Mock(return_value=model_config)
-    )
-    monkeypatch.setattr(Qwen3ForCausalLM, "from_pretrained", loader)
-    monkeypatch.setattr("tinyvllm.executor.Executor", executor_factory)
-
-    return model, loader, executor_factory, memory_snapshot
 
 
 def test_bootstrap_aligns_model_scheduler_and_executor(

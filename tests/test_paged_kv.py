@@ -9,7 +9,7 @@ def store(device='cpu'):
                         num_kv_heads=1, head_dim=2, device=device, dtype=torch.float32)
 
 
-@pytest.mark.parametrize('device', ['cpu', pytest.param('cuda', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required'))])
+@pytest.mark.parametrize('device', ['cpu', pytest.param('cuda', marks=pytest.mark.cuda)])
 def test_noncontiguous_write_read_and_layer_isolation(device):
     cache = store(device)
     cache.key.fill_(float('nan'))
@@ -43,7 +43,7 @@ def test_storage_rejects_structural_errors_before_copy(kind):
     assert (cache.key == 0).all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
+@pytest.mark.cuda
 def test_storage_operations_do_not_read_gpu_scalars():
     cache = store('cuda')
     slots = torch.tensor([1, 5], device='cuda')

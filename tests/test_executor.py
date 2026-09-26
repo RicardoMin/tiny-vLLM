@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -83,3 +86,14 @@ def test_partial_device_failure_fail_stops_and_releases_store(point, monkeypatch
     assert engine.scheduler.block_manager.free_block_count == 8
     with pytest.raises(RuntimeError, match='engine is failed'):
         engine.step(now_ns=2)
+
+
+def test_executor_releases_sampler_even_if_runner_cleanup_fails():
+    from tinyvllm.executor import Executor
+
+    executor = object.__new__(Executor)
+    executor.runner = SimpleNamespace(clear=Mock(side_effect=RuntimeError('cleanup')))
+    executor.sampler = SimpleNamespace(clear=Mock())
+    with pytest.raises(RuntimeError, match='cleanup'):
+        executor.clear()
+    executor.sampler.clear.assert_called_once()

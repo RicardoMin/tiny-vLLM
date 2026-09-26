@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 import torch
@@ -20,9 +19,9 @@ def _fresh_batch(lengths=(5, 3), *, block_size=3):
     # Reversed nonadjacent first/second halves exercise logical page ordering.
     physical = list(range(num_blocks))[::2][::-1] + list(range(num_blocks))[1::2]
     block_ids = tuple(physical[:sum(counts)])
-    offsets, table_offsets, positions, slots, owners = [0], [0], [], [], []
+    offsets, table_offsets, positions, slots = [0], [0], [], []
 
-    for index, (length, count) in enumerate(zip(lengths, counts)):
+    for length, count in zip(lengths, counts):
         first = table_offsets[-1]
         table = block_ids[first:first + count]
         slots.extend(
@@ -30,7 +29,6 @@ def _fresh_batch(lengths=(5, 3), *, block_size=3):
             for position in range(length)
         )
         positions.extend(range(length))
-        owners.extend([index] * length)
         offsets.append(offsets[-1] + length)
         table_offsets.append(first + count)
 
@@ -41,7 +39,6 @@ def _fresh_batch(lengths=(5, 3), *, block_size=3):
         num_decode_items=0,
         input_ids=tuple(range(1, sum(lengths) + 1)),
         positions=tuple(positions),
-        token_request_slots=tuple(owners),
         q_offsets=tuple(offsets),
         context_lens_before=(0,) * len(lengths),
         query_lens=lengths,
@@ -86,13 +83,7 @@ def test_fresh_lowering_omits_gather_metadata_but_reference_keeps_it(monkeypatch
         assert read_slots.tolist() == list(batch.kv_slot_mapping[start:end])
 
 
-CUDA_ENABLED = (
-    os.environ.get("TINYVLLM_RUN_CUDA") == "1"
-    and torch.cuda.is_available()
-)
-
-
-@pytest.mark.skipif(not CUDA_ENABLED, reason="requires TINYVLLM_RUN_CUDA=1 and CUDA")
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "dtype,lengths,heads,kv_heads,head_dim,block_size",
     [

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 import torch
@@ -11,11 +10,11 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.bias import CausalBias
 
 from tinyvllm.batch import PreparedBatch, StepMode
-from tinyvllm.paged_kv import PagedKVCache
 from tinyvllm.request import SamplingParams
 from tinyvllm.runtime import attention as attention_module
-from tinyvllm.runtime.attention import CudaAttention, ReferenceAttention
+from tinyvllm.runtime.attention import ReferenceAttention
 from tinyvllm.runtime.contracts import ModelInput
+from attention_helpers import _inputs, _oracle
 
 
 def _chunk_batch(before, query_len, *, block_size=16):
@@ -25,15 +24,14 @@ def _chunk_batch(before, query_len, *, block_size=16):
     counts = tuple((length + block_size - 1) // block_size for length in afters)
     num_blocks = sum(counts) + 2
     physical = list(range(num_blocks))[::2][::-1] + list(range(num_blocks))[1::2]
-    tables, positions, owners, slots = [], [], [], []
+    tables, positions, slots = [], [], []
     offsets, table_offsets = [0], [0]
 
-    for index, (start, end, count) in enumerate(zip(befores, afters, counts)):
+    for start, end, count in zip(befores, afters, counts):
         table = physical[table_offsets[-1]:table_offsets[-1] + count]
         tables.extend(table)
         table_offsets.append(len(tables))
         positions.extend(range(start, end))
-        owners.extend([index] * (end - start))
         slots.extend(
             table[position // block_size] * block_size + position % block_size
             for position in range(start, end)
@@ -46,7 +44,6 @@ def _chunk_batch(before, query_len, *, block_size=16):
         num_decode_items=0,
         input_ids=tuple(range(1, sum(lengths) + 1)),
         positions=tuple(positions),
-        token_request_slots=tuple(owners),
         q_offsets=tuple(offsets),
         context_lens_before=befores,
         query_lens=lengths,
@@ -61,72 +58,6 @@ def _chunk_batch(before, query_len, *, block_size=16):
         kv_slot_mapping=tuple(slots),
         request_ids=(10, 20),
     )
-
-
-def _inputs(batch, *, device, dtype, heads, kv_heads, head_dim):
-    generator = torch.Generator().manual_seed(2081)
-    query = torch.randn(
-        batch.num_query_tokens, heads, head_dim, generator=generator,
-    ).to(device=device, dtype=dtype)
-    logical_keys, logical_values = [], []
-    new_keys, new_values = [], []
-    cache = PagedKVCache(
-        num_layers=2,
-        num_blocks=batch.kv_num_blocks,
-        block_size=batch.kv_block_size,
-        num_kv_heads=kv_heads,
-        head_dim=head_dim,
-        device=device,
-        dtype=dtype,
-    )
-    cache.key.fill_(float("nan"))
-    cache.value.fill_(float("nan"))
-
-    for index, (before, after) in enumerate(zip(
-        batch.context_lens_before, batch.context_lens_after,
-    )):
-        key = torch.randn(after, kv_heads, head_dim, generator=generator).to(dtype)
-        value = torch.randn(after, kv_heads, head_dim, generator=generator).to(dtype)
-        logical_keys.append(key)
-        logical_values.append(value)
-        new_keys.append(key[before:])
-        new_values.append(value[before:])
-        first, last = batch.kv_block_table_offsets[index:index + 2]
-        table = batch.kv_block_table_ids[first:last]
-        old_slots = torch.tensor([
-            table[position // batch.kv_block_size] * batch.kv_block_size
-            + position % batch.kv_block_size
-            for position in range(before)
-        ], device=device, dtype=torch.long)
-        for layer in range(2):
-            cache.key[layer].index_copy_(0, old_slots, key[:before].to(device))
-            cache.value[layer].index_copy_(0, old_slots, value[:before].to(device))
-
-    key = torch.cat(new_keys).to(device)
-    # Match the noncontiguous token stride of a value slice from fused QKV.
-    packed = torch.empty(
-        batch.num_query_tokens, 2 * kv_heads, head_dim, device=device, dtype=dtype,
-    )
-    value = packed[:, kv_heads:]
-    value.copy_(torch.cat(new_values))
-    data = ModelInput.from_prepared_batch(batch, device=device, paged_decode=True)
-    return CudaAttention(batch, data, cache), query, key, value, logical_keys, logical_values
-
-
-def _oracle(batch, query, logical_keys, logical_values, scale):
-    outputs = []
-    for index, (key, value) in enumerate(zip(logical_keys, logical_values)):
-        start, end = batch.q_offsets[index:index + 2]
-        q = query[start:end].float().cpu().transpose(0, 1)
-        repeats = q.shape[0] // key.shape[1]
-        k = key.float().repeat_interleave(repeats, dim=1).transpose(0, 1)
-        v = value.float().repeat_interleave(repeats, dim=1).transpose(0, 1)
-        scores = (q @ k.transpose(-1, -2)) * scale
-        positions = torch.arange(batch.context_lens_before[index], key.shape[0])
-        future = torch.arange(key.shape[0])[None, :] > positions[:, None]
-        scores.masked_fill_(future, -float("inf"))
-        outputs.append((scores.softmax(-1) @ v).transpose(0, 1))
-    return torch.cat(outputs)
 
 
 @torch.inference_mode()
@@ -168,15 +99,7 @@ def test_chunk_cpu_fallback_reuses_mask_and_preserves_reference(monkeypatch):
     torch.testing.assert_close(repeated, expected, atol=1e-6, rtol=1e-5)
 
 
-CUDA_ENABLED = (
-    os.environ.get("TINYVLLM_RUN_CUDA") == "1" and torch.cuda.is_available()
-)
-cuda_gate = pytest.mark.skipif(
-    not CUDA_ENABLED, reason="requires TINYVLLM_RUN_CUDA=1 and CUDA",
-)
-
-
-@cuda_gate
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "before,query_len,dtype,heads,kv_heads,head_dim",
     [
@@ -224,7 +147,7 @@ def test_chunk_flash_matches_independent_oracle_and_causality(
     assert not torch.equal(changed[query_len - 1], actual[query_len - 1])
 
 
-@cuda_gate
+@pytest.mark.cuda
 @torch.inference_mode()
 def test_chunk_math_fallback_uses_lower_right_and_reuses_mask(monkeypatch):
     batch = _chunk_batch(5, 3, block_size=3)

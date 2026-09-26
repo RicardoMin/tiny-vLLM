@@ -19,12 +19,6 @@ def _check_token_id(token_id: int) -> None:
     _check_non_negative_int("token_id", token_id)
 
 
-def _require_model_type(value: object) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError("model_type must be a non-empty string")
-    return value
-
-
 def _normalize_token_ids(
     name: str,
     values: int | Iterable[int] | None,

@@ -15,15 +15,7 @@ from tinyvllm.runtime.runner import ModelRunner
 from paged_helpers import logical_kv, prepare, scenario
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("TINYVLLM_RUN_CUDA") != "1",
-    reason="set TINYVLLM_RUN_CUDA=1 to run CUDA integration gates",
-)
-
-
-def _require_cuda() -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
+pytestmark = pytest.mark.cuda
 
 
 def _runners(model, *, block_size, num_blocks, max_model_len, backend="cuda"):
@@ -144,7 +136,7 @@ def _run_pair(
                             )
 
                 transaction.complete_writes()
-                if step_id == release_after[0]:
+                if release_after is not None and step_id == release_after[0]:
                     request_id = release_after[1]
                     retired_blocks = {
                         ref.block_id for ref in manager.block_table(request_id)
@@ -162,11 +154,11 @@ def _run_pair(
         hook.remove()
         for runner in runners:
             runner.clear()
-    assert observed_reuse
+    if reused_request is not None:
+        assert observed_reuse
 
 
 def test_small_bf16_model_preserves_mixed_history_and_uses_one_flat_forward(monkeypatch):
-    _require_cuda()
     torch.manual_seed(773)
     config = HFConfig(
         vocab_size=41,
@@ -286,107 +278,52 @@ def _long_scenario():
     )
 
 
-@pytest.mark.skipif(
-    not os.environ.get("TINYVLLM_MODEL"),
-    reason="set TINYVLLM_MODEL to local Qwen3 weights for the real model gate",
-)
+@pytest.mark.model
+@pytest.mark.parametrize("shape", ["mixed_reuse", "long_chunks"])
 @pytest.mark.parametrize("backend", [
     "cuda",
     pytest.param(
         "flashinfer",
-        marks=pytest.mark.skipif(
-            os.environ.get("TINYVLLM_RUN_FLASHINFER") != "1",
-            reason="set TINYVLLM_RUN_FLASHINFER=1 for the optional backend",
-        ),
+        marks=pytest.mark.flashinfer,
     ),
 ])
-def test_real_qwen3_logits_stay_within_fixed_same_shape_budget(monkeypatch, backend):
-    _require_cuda()
+def test_real_qwen3_logits_stay_within_fixed_same_shape_budget(monkeypatch, backend, shape):
+    if shape == "long_chunks":
+        first = tuple(range(100, 1252))
+        second = tuple(range(3000, 4081))
+        prefill = WorkClass.PREFILL
+        steps = (
+            ((10, first, 256, False, prefill), (22, second, 17, False, prefill)),
+            ((22, second, 65, False, prefill), (10, first, 256, False, prefill)),
+            ((10, first, 512, False, prefill), (22, second, 512, False, prefill)),
+            ((22, second, 487, True, prefill), (10, first, 128, True, prefill)),
+            ((10, first + (1500,), 1, True, WorkClass.DECODE),
+             (22, second + (4500,), 1, True, WorkClass.DECODE)),
+        )
+        num_blocks, max_model_len = 144, 1280
+        release_after, reused_request = None, None
+    else:
+        steps = _long_scenario()
+        num_blocks, max_model_len = 14, 256
+        release_after, reused_request = (3, 22), 44
+
     model = Qwen3ForCausalLM.from_pretrained(
         os.environ["TINYVLLM_MODEL"], device="cuda", dtype=torch.bfloat16,
     )
-    manager = BlockManager(block_size=16, num_blocks=14)
+    manager = BlockManager(block_size=16, num_blocks=num_blocks)
     runners = _runners(
-        model, block_size=16, num_blocks=14, max_model_len=256, backend=backend,
+        model, block_size=16, num_blocks=num_blocks,
+        max_model_len=max_model_len, backend=backend,
     )
     budget = _RealLogitBudget()
     try:
         _run_pair(
-            model, runners, manager, _long_scenario(), monkeypatch,
-            max_model_len=256,
-            release_after=(3, 22),
-            reused_request=44,
+            model, runners, manager, steps, monkeypatch,
+            max_model_len=max_model_len,
+            release_after=release_after,
+            reused_request=reused_request,
             check_tensors=False,
             check_logits=budget,
         )
     finally:
         print(budget.summary())
-
-
-
-@pytest.mark.skipif(
-    not os.environ.get("TINYVLLM_MODEL"),
-    reason="set TINYVLLM_MODEL for the extended chunk regression",
-)
-@pytest.mark.parametrize("backend", [
-    "cuda",
-    pytest.param(
-        "flashinfer",
-        marks=pytest.mark.skipif(
-            os.environ.get("TINYVLLM_RUN_FLASHINFER") != "1",
-            reason="set TINYVLLM_RUN_FLASHINFER=1 for the optional backend",
-        ),
-    ),
-])
-def test_real_qwen3_long_chunks_against_previous_cuda_attention(backend):
-    """Isolate the chunk backend change; both runners keep identical decode."""
-    from tinyvllm.runtime.attention import CudaAttention, ReferenceAttention
-
-    class PreviousCudaAttention(CudaAttention):
-        _make_mask = ReferenceAttention._make_mask
-
-    _require_cuda()
-    model = Qwen3ForCausalLM.from_pretrained(
-        os.environ["TINYVLLM_MODEL"], device="cuda", dtype=torch.bfloat16,
-    )
-    runners = tuple(
-        ModelRunner(model, block_size=16, num_blocks=144,
-                    max_model_len=1280, attention_backend=name)
-        for name in ("cuda", backend)
-    )
-    runners[0].attention_type = PreviousCudaAttention
-    for runner in runners:
-        runner.kv_cache.key.fill_(float("nan"))
-        runner.kv_cache.value.fill_(float("nan"))
-    manager = BlockManager(block_size=16, num_blocks=144)
-    first = tuple(range(100, 1252))
-    second = tuple(range(3000, 4081))
-    prefill = WorkClass.PREFILL
-    steps = (
-        ((10, first, 256, False, prefill), (22, second, 17, False, prefill)),
-        ((22, second, 65, False, prefill), (10, first, 256, False, prefill)),
-        ((10, first, 512, False, prefill), (22, second, 512, False, prefill)),
-        ((22, second, 487, True, prefill), (10, first, 128, True, prefill)),
-        ((10, first + (1500,), 1, True, WorkClass.DECODE),
-         (22, second + (4500,), 1, True, WorkClass.DECODE)),
-    )
-    budget = _RealLogitBudget()
-    try:
-        with torch.inference_mode():
-            for step_id, records in enumerate(steps):
-                transaction, batch = prepare(
-                    manager, step_id, records, max_model_len=1280,
-                )
-                transaction.commit_before_dispatch()
-                expected = runners[0].run(batch)
-                actual = runners[1].run(batch)
-                if expected is None:
-                    assert actual is None
-                else:
-                    budget(actual, expected)
-                transaction.complete_writes()
-    finally:
-        for runner in runners:
-            runner.clear()
-        print("extended P3-B1 vs chunk backend:", budget.summary())
-    assert budget.rows == 4

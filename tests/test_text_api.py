@@ -8,9 +8,9 @@ import pytest
 
 from tinyvllm import EngineConfig, LLM, SamplingParams, TextOutput
 from tinyvllm.engine import Engine
-from tinyvllm.executor import CpuFakeExecutor
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.tokenizer import Tokenizer
-from test_engine import make_engine
+from engine_helpers import make_engine
 
 
 class FakeTokenizer:
@@ -138,33 +138,6 @@ def test_chat_passes_thinking_explicitly_and_closed_llm_rejects_work(monkeypatch
         engine.submit((1,), SamplingParams())
 
 
-def test_close_discards_pending_work_and_attempts_both_cleanup_paths(monkeypatch):
-    engine = make_engine()
-    engine.submit((1, 2), SamplingParams(max_new_tokens=2))
-    calls = []
-    shutdown = engine.scheduler.shutdown
-
-    def failed_shutdown():
-        shutdown()
-        calls.append('scheduler')
-        raise RuntimeError('injected scheduler cleanup error')
-
-    class Executor:
-        def clear(self):
-            calls.append('executor')
-
-    monkeypatch.setattr(engine.scheduler, 'shutdown', failed_shutdown)
-    engine.executor = Executor()
-    with pytest.raises(RuntimeError, match='cleanup failed') as captured:
-        engine.close()
-    assert calls == ['scheduler', 'executor']
-    assert 'scheduler cleanup failed' in captured.value.__notes__[0]
-    assert not engine.has_unfinished()
-    engine.close()
-    with pytest.raises(RuntimeError, match='closed'):
-        engine.step()
-
-
 def test_context_cleanup_does_not_replace_the_original_error(monkeypatch, tmp_path):
     llm, engine = make_llm(monkeypatch, tmp_path)
     original = engine.close
@@ -193,36 +166,6 @@ def test_context_can_close_an_already_failed_engine(monkeypatch, tmp_path):
     assert llm._engine is None
     assert not engine.has_unfinished()
     engine.close()
-
-
-def test_close_during_generate_is_rejected_without_discarding_the_batch():
-    engine = make_engine()
-    fake = CpuFakeExecutor(token_id=6)
-
-    def execute(batch):
-        with pytest.raises(RuntimeError, match='cannot close'):
-            engine.close()
-        return fake.execute(batch)
-
-    engine.executor = SimpleNamespace(
-        capabilities=fake.capabilities, execute=execute,
-        release=fake.release, clear=fake.clear,
-    )
-    from tinyvllm.engine import GenerateRequest
-
-    assert engine.generate((GenerateRequest((1,), SamplingParams(max_new_tokens=1)),))[0].output_token_ids == (6,)
-    engine.close()
-
-
-def test_executor_releases_sampler_even_if_runner_cleanup_fails():
-    from tinyvllm.executor import Executor
-
-    executor = object.__new__(Executor)
-    executor.runner = SimpleNamespace(clear=Mock(side_effect=RuntimeError('cleanup')))
-    executor.sampler = SimpleNamespace(clear=Mock())
-    with pytest.raises(RuntimeError, match='cleanup'):
-        executor.clear()
-    executor.sampler.clear.assert_called_once()
 
 
 def test_missing_tokenizer_fails_before_model_loading(monkeypatch, tmp_path):

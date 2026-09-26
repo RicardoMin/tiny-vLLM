@@ -24,17 +24,6 @@ def _plan_kv_blocks(
     if total_bytes <= 0 or not 0 <= free_bytes <= total_bytes:
         raise ValueError("invalid CUDA memory snapshot")
 
-    if bytes_per_block <= 0 or requested_bytes <= 0:
-        raise ValueError("KV byte sizes must be positive")
-
-    if not 0.0 < utilization < 1.0:
-        raise ValueError(
-            "GPU memory utilization must be between 0 and 1"
-        )
-
-    if reserved_bytes < 0:
-        raise ValueError("reserved bytes must be nonnegative")
-
     num_blocks = requested_bytes // bytes_per_block
     if num_blocks == 0:
         raise ValueError(

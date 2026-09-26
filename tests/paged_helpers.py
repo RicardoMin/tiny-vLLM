@@ -3,10 +3,9 @@ import torch
 from transformers import Qwen3Config as HFConfig, Qwen3ForCausalLM as HFModel
 
 from tinyvllm.batch import BatchBuilder, StepPlan, WorkItem
-from tinyvllm.cache import BlockAppend, BlockManager
+from tinyvllm.cache import BlockAppend
 from tinyvllm.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from tinyvllm.request import RequestState, SamplingParams, WorkClass
-from tinyvllm.runtime.runner import ModelRunner
 
 
 def models(dtype=torch.float32, device='cpu'):

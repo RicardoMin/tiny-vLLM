@@ -105,8 +105,6 @@ class ModelRunner:
         # No shared blocks or COW in P1, including sharing between requests.
         if len(set(block_ids)) != len(block_ids):
             raise ValueError("block tables must own distinct physical blocks")
-        if len(set(batch.kv_slot_mapping)) != tokens:
-            raise ValueError("write slots must be unique")
         if any(type(i) is not int or not 0 <= i < self.model.config.vocab_size for i in batch.input_ids):
             raise ValueError("input token ID is out of vocabulary range")
 

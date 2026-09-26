@@ -128,24 +128,24 @@ class AsyncEngine:
         for value in (max_requests, max_reserved_tokens, max_buffered_tokens):
             if type(value) is not int or value <= 0:
                 raise ValueError("bridge limits must be positive integers")
-            self._config = config
-            self._max_requests = max_requests
-            self._max_reserved_tokens = max_reserved_tokens
-            self._max_buffered_tokens = max_buffered_tokens
-            self._condition = threading.Condition()
-            self._slots: dict[int, _Slot] = {}
-            self._pending: deque[_Slot] = deque()
-            self._cancels: set[int] = set()
-            self._dirty: set[int] = set()
-            self._notification_pending = False
-            self._reserved_tokens = 0
-            self._next_id = 0
-            self._closing = False
-            self._loop: asyncio.AbstractEventLoop | None = None
-            self._thread: threading.Thread | None = None
-            self._ready: Future[str | None] = Future()
-            self._done: Future[str | None] = Future()
-            self._close_task: asyncio.Task | None = None
+        self._config = config
+        self._max_requests = max_requests
+        self._max_reserved_tokens = max_reserved_tokens
+        self._max_buffered_tokens = max_buffered_tokens
+        self._condition = threading.Condition()
+        self._slots: dict[int, _Slot] = {}
+        self._pending: deque[_Slot] = deque()
+        self._cancels: set[int] = set()
+        self._dirty: set[int] = set()
+        self._notification_pending = False
+        self._reserved_tokens = 0
+        self._next_id = 0
+        self._closing = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready: Future[str | None] = Future()
+        self._done: Future[str | None] = Future()
+        self._close_task: asyncio.Task | None = None
 
 
     def _check_loop(self) -> None:
@@ -270,7 +270,6 @@ class AsyncEngine:
 
     def _run(self) -> None:
         engine = None
-        active: set[int] = set()
         failure = None
 
         try:
@@ -279,7 +278,12 @@ class AsyncEngine:
             while True:
                 with self._condition:
                     self._condition.wait_for(
-                        lambda: self._closing or self._pending or self._cancels or active
+                        lambda: (
+                            self._closing
+                            or self._pending
+                            or self._cancels
+                            or engine.has_unfinished()
+                        )
                     )
                     if self._closing:
                         break
@@ -306,20 +310,17 @@ class AsyncEngine:
                             self._fail(slot, error_type, str(error))
                             slot.retired = True
                             self._retire(slot)
-                    else:
-                        active.add(slot.request_id)
                     finally:
                         slot.prompt = ()
 
                 for request_id in cancels:
-                    if request_id in active:
-                        engine.cancel(request_id)
+                    engine.cancel(request_id)
 
                 with self._condition:
                     if self._closing:
                         continue
 
-                if not active:
+                if not engine.has_unfinished():
                     continue
                 events = engine.step()
                 with self._condition:
@@ -336,7 +337,6 @@ class AsyncEngine:
                             self._notify(slot)
 
                     for event in events.completion_events:
-                        active.remove(event.request_id)
                         slot = self._slots[event.request_id]
                         slot.retired = True
                         if not slot.released and slot.terminal is None:

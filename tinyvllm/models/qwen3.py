@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from tinyvllm._validation import _check_positive_int
 from tinyvllm.checkpoint import load_weights
 from tinyvllm.runtime.contracts import AttentionBackend
 from tinyvllm.layers import (
@@ -128,19 +129,23 @@ class Qwen3Config:
                 "only model_type='qwen3' is supported"
             )
 
+        dimension_names = (
+            "vocab_size",
+            "hidden_size",
+            "intermediate_size",
+            "num_hidden_layers",
+            "max_position_embeddings",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+        )
         try:
-            dimensions = (
-                int(config.vocab_size),
-                int(config.hidden_size),
-                int(config.intermediate_size),
-                int(config.num_hidden_layers),
-                int(config.max_position_embeddings),
-                int(config.num_attention_heads),
-                int(config.num_key_value_heads),
-                int(config.head_dim),
-            )
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ValueError("invalid Qwen3 dimensions") from exc
+            dimensions = tuple(getattr(config, name) for name in dimension_names)
+        except AttributeError as exc:
+            raise ValueError("missing Qwen3 dimensions") from exc
+
+        for name, value in zip(dimension_names, dimensions):
+            _check_positive_int(name, value)
 
         (
             vocab_size,
@@ -152,11 +157,6 @@ class Qwen3Config:
             kv_heads,
             head_dim,
         ) = dimensions
-
-        if min(dimensions) <= 0:
-            raise ValueError(
-                "Qwen3 dimensions must be positive"
-            )
 
         if heads % kv_heads != 0:
             raise ValueError(
@@ -278,7 +278,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         *,
         layer_idx: int,
-        attention: AttentionBackend | None = None,
+        attention: AttentionBackend,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
 
@@ -483,7 +483,7 @@ class Qwen3Model(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor | None = None,
+        positions: torch.Tensor,
         *,
         attention: AttentionBackend,
     ) -> torch.Tensor:
@@ -532,7 +532,7 @@ class Qwen3ForCausalLM(nn.Module):
             config.hidden_size,
             config.vocab_size,
             bias=False,
-            device=device,
+            device="meta" if config.tie_word_embeddings else device,
             dtype=dtype,
         )
 
@@ -683,8 +683,8 @@ class Qwen3ForCausalLM(nn.Module):
             target = self.get_parameter(target_name)
             if tensor.shape != target.shape:
                 raise ValueError(
-                    f"{source_name}: expected shape {tuple(target.shape)},"
-                    f"got {tuple(tensor)}"
+                    f"{source_name}: expected shape {tuple(target.shape)}, "
+                    f"got {tuple(tensor.shape)}"
                 )
             with torch.no_grad():
                 target.copy_(tensor)
@@ -707,7 +707,7 @@ class Qwen3ForCausalLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor | None = None,
+        positions: torch.Tensor,
         *,
         attention: AttentionBackend,
     ) -> torch.Tensor:

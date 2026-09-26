@@ -9,10 +9,8 @@ import torch
 from tinyvllm import Engine, EngineConfig, GenerateRequest, SamplingParams
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or not os.environ.get("TINYVLLM_MODEL"),
-    reason="requires CUDA and TINYVLLM_MODEL",
-)
+@pytest.mark.cuda
+@pytest.mark.model
 def test_real_bootstrap_generation_and_kv_release():
     config = EngineConfig(
         model=Path(os.environ['TINYVLLM_MODEL']),

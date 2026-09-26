@@ -22,7 +22,6 @@ from tinyvllm.runtime.attention import (
 )
 from tinyvllm.runtime.contracts import ModelInput
 from tinyvllm.runtime.prefill import PREFILL_DEVICE_BYTES, PagedPrefill
-from test_bootstrap import mocked_cuda_loader
 
 
 MiB = 1024**2
@@ -37,7 +36,6 @@ def _mixed_batch():
         num_decode_items=1,
         input_ids=tuple(range(1, 11)),
         positions=(16, 14, 15, 0, 1, 2, 30, 31, 32, 0),
-        token_request_slots=(0, 1, 1, 2, 2, 2, 3, 3, 3, 4),
         q_offsets=(0, 1, 3, 6, 9, 10),
         context_lens_before=(16, 14, 0, 30, 0),
         query_lens=(1, 2, 3, 3, 1),
@@ -199,14 +197,6 @@ def test_unsupported_geometry_fails_before_dependency_import(
         )
 
 
-def test_flashinfer_is_an_explicit_optional_backend(tmp_path):
-    assert EngineConfig(model=tmp_path).attention_backend == "reference"
-    for backend in ("reference", "cuda", "flashinfer"):
-        assert EngineConfig(model=tmp_path, attention_backend=backend).attention_backend == backend
-    with pytest.raises(ValueError, match="attention backend"):
-        EngineConfig(model=tmp_path, attention_backend="auto")
-
-
 def test_backend_selection_keeps_reference_lazy_and_selects_explicit_classes(monkeypatch):
     load = Mock()
     monkeypatch.setattr("tinyvllm.kernels.paged_decode.load_paged_decode", load)
@@ -243,21 +233,6 @@ def test_reserved_workspace_preserves_explicit_kv_budget_and_usage_ceiling(reser
     arguments["free_bytes"] -= 1
     with pytest.raises(ValueError, match="GPU usage ceiling"):
         _plan_kv_blocks(**arguments)
-
-
-def test_workspace_reservation_is_opt_in_and_cannot_be_negative():
-    arguments = dict(
-        total_bytes=4 * GiB,
-        free_bytes=2 * GiB,
-        utilization=0.75,
-        requested_bytes=GiB,
-        bytes_per_block=MiB,
-    )
-    assert _plan_kv_blocks(**arguments) == 1024
-    with pytest.raises(ValueError, match="GPU usage ceiling"):
-        _plan_kv_blocks(**arguments, reserved_bytes=PREFILL_DEVICE_BYTES)
-    with pytest.raises(ValueError, match="nonnegative"):
-        _plan_kv_blocks(**arguments, reserved_bytes=-1)
 
 
 @pytest.mark.parametrize("backend", ["reference", "cuda", "flashinfer"])

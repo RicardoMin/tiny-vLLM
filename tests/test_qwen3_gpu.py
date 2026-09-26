@@ -14,7 +14,8 @@ from paged_helpers import DenseAttentionOracle, prepare, scenario, logical_kv
 MODEL_PATH = os.environ.get('TINYVLLM_MODEL')
 
 
-@pytest.mark.skipif(not MODEL_PATH or not torch.cuda.is_available(), reason='TINYVLLM_MODEL and CUDA required')
+@pytest.mark.cuda
+@pytest.mark.model
 def test_real_qwen3_bf16_paged_matches_dense_same_batch():
     model = Qwen3ForCausalLM.from_pretrained(MODEL_PATH, device='cuda', dtype=torch.bfloat16)
     manager = BlockManager(block_size=2, num_blocks=16)

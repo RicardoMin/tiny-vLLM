@@ -4,7 +4,7 @@ import pytest
 
 from benchmarks.tools.measurement import ExecutionProbe, replay
 from tinyvllm.engine import Engine, EngineStepEvents, TokenEvent
-from tinyvllm.executor import CpuFakeExecutor
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.request import RequestStatus, SamplingParams
 from tinyvllm.scheduler import Scheduler
 

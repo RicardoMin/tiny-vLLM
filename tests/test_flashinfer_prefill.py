@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import os
 import weakref
 from types import SimpleNamespace
 
@@ -12,13 +11,10 @@ import torch
 
 from tinyvllm.batch import PreparedBatch, StepMode
 from tinyvllm.runtime.prefill import PagedPrefill
-from test_cuda_chunk import _inputs, _oracle
+from attention_helpers import _inputs, _oracle
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("TINYVLLM_RUN_FLASHINFER") != "1",
-    reason="set TINYVLLM_RUN_FLASHINFER=1 to run FlashInfer gates",
-)
+pytestmark = pytest.mark.flashinfer
 
 
 def _batch(befores=(63, 31, 0, 18), lengths=(1, 17, 5, 3)):
@@ -28,15 +24,14 @@ def _batch(befores=(63, 31, 0, 18), lengths=(1, 17, 5, 3)):
     counts = tuple((after + block_size - 1) // block_size for after in afters)
     num_blocks = sum(counts) + 3
     physical = list(range(num_blocks))[::2][::-1] + list(range(num_blocks))[1::2]
-    tables, positions, owners, slots = [], [], [], []
+    tables, positions, slots = [], [], []
     offsets, table_offsets = [0], [0]
 
-    for index, (before, after, count) in enumerate(zip(befores, afters, counts)):
+    for before, after, count in zip(befores, afters, counts):
         table = physical[len(tables):len(tables) + count]
         tables.extend(table)
         table_offsets.append(len(tables))
         positions.extend(range(before, after))
-        owners.extend([index] * (after - before))
         slots.extend(
             table[position // block_size] * block_size + position % block_size
             for position in range(before, after)
@@ -50,7 +45,6 @@ def _batch(befores=(63, 31, 0, 18), lengths=(1, 17, 5, 3)):
         num_decode_items=decode_count,
         input_ids=tuple(range(1, sum(lengths) + 1)),
         positions=tuple(positions),
-        token_request_slots=tuple(owners),
         q_offsets=tuple(offsets),
         context_lens_before=tuple(befores),
         query_lens=tuple(lengths),

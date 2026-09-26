@@ -1,7 +1,6 @@
 """Paged-decode contracts and an opt-in independent CUDA numerical gate."""
 
 import math
-import os
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -10,7 +9,6 @@ import torch
 from torch import nn
 
 from tinyvllm.batch import PreparedBatch, StepMode
-from tinyvllm.config import EngineConfig
 from tinyvllm.paged_kv import PagedKVCache
 from tinyvllm.request import SamplingParams
 from tinyvllm.runtime.contracts import ModelInput, SingleQueryMetadata
@@ -25,18 +23,14 @@ def _batch(query_lens=(1, 3, 1), context_lens=(17, 5, 1)):
     table_offsets = [0]
     positions = []
     slots = []
-    token_request_slots = []
 
-    for index, (query_len, after, table) in enumerate(
-        zip(query_lens, context_lens, block_tables)
-    ):
+    for query_len, after, table in zip(query_lens, context_lens, block_tables):
         before = after - query_len
         positions.extend(range(before, after))
         slots.extend(
             table[position // block_size] * block_size + position % block_size
             for position in range(before, after)
         )
-        token_request_slots.extend([index] * query_len)
         q_offsets.append(q_offsets[-1] + query_len)
         table_offsets.append(table_offsets[-1] + len(table))
 
@@ -46,7 +40,6 @@ def _batch(query_lens=(1, 3, 1), context_lens=(17, 5, 1)):
         num_decode_items=int(query_lens[0] == 1),
         input_ids=tuple(range(1, q_offsets[-1] + 1)),
         positions=tuple(positions),
-        token_request_slots=tuple(token_request_slots),
         q_offsets=tuple(q_offsets),
         context_lens_before=tuple(
             after - query_len
@@ -114,14 +107,6 @@ def test_multi_query_only_batch_has_no_single_query_metadata():
             for slots in data.kv.read_slots] == [17, 5, None]
 
 
-def test_attention_backend_config_is_explicit_and_reference_is_default(tmp_path):
-    assert EngineConfig(model=tmp_path).attention_backend == "reference"
-    assert EngineConfig(model=tmp_path, attention_backend="cuda").attention_backend == "cuda"
-
-    with pytest.raises(ValueError, match="attention backend"):
-        EngineConfig(model=tmp_path, attention_backend="automatic")
-
-
 @pytest.mark.parametrize("backend", ["cuda", "automatic"])
 def test_runner_rejects_unsupported_backend_before_allocating_cache(backend, monkeypatch):
     model = nn.Module()
@@ -148,13 +133,7 @@ def test_runner_rejects_unsupported_backend_before_allocating_cache(backend, mon
         )
 
 
-CUDA_ENABLED = (
-    os.environ.get("TINYVLLM_RUN_CUDA") == "1"
-    and torch.cuda.is_available()
-)
-
-
-@pytest.mark.skipif(not CUDA_ENABLED, reason="requires TINYVLLM_RUN_CUDA=1 and CUDA")
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "dtype,lengths,num_heads,num_kv_heads,head_dim,strided,qk_magnitude,block_size,offset_storage",
     [
@@ -318,7 +297,7 @@ def test_paged_decode_matches_independent_fp32_dense_attention(
     assert torch.equal(actual[untouched], torch.full_like(actual[untouched], 123))
 
 
-@pytest.mark.skipif(not CUDA_ENABLED, reason="requires TINYVLLM_RUN_CUDA=1 and CUDA")
+@pytest.mark.cuda
 @torch.inference_mode()
 def test_paged_decode_obeys_current_stream_and_event_dependencies():
     from tinyvllm.kernels.paged_decode import paged_decode_attention
@@ -385,7 +364,7 @@ def test_paged_decode_obeys_current_stream_and_event_dependencies():
     )
 
 
-@pytest.mark.skipif(not CUDA_ENABLED, reason="requires TINYVLLM_RUN_CUDA=1 and CUDA")
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "invalid",
     [

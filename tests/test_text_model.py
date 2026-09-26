@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import gc
-import os
-from pathlib import Path
 import weakref
 
 import pytest
 
-from tinyvllm import EngineConfig, GenerateRequest, LLM, SamplingParams
+from tinyvllm import GenerateRequest, LLM, SamplingParams
 from tinyvllm.tokenizer import Tokenizer
 
 
-model_path = os.environ.get('TINYVLLM_MODEL')
-model_gate = pytest.mark.skipif(not model_path, reason='set TINYVLLM_MODEL to local Qwen3 assets')
-
-
-@model_gate
-def test_real_tokenizer_preserves_unicode_and_uses_exact_qwen_template():
+@pytest.mark.model
+def test_real_tokenizer_preserves_unicode_and_uses_exact_qwen_template(model_path):
     tokenizer = Tokenizer(model_path)
     texts = ('Hello, tiny-vLLM!\n', '你好，世界🙂\n第二行。', '  space\t space\n')
     for text in texts:
@@ -30,21 +24,14 @@ def test_real_tokenizer_preserves_unicode_and_uses_exact_qwen_template():
     assert tokenizer.decode((tokenizer._tokenizer.eos_token_id,)) == ''
 
 
-@model_gate
-@pytest.mark.skipif(os.environ.get('TINYVLLM_RUN_CUDA') != '1', reason='set TINYVLLM_RUN_CUDA=1')
+@pytest.mark.model
+@pytest.mark.cuda
 @pytest.mark.parametrize('backend', [
     'reference', 'cuda',
-    pytest.param('flashinfer', marks=pytest.mark.skipif(
-        os.environ.get('TINYVLLM_RUN_FLASHINFER') != '1', reason='set TINYVLLM_RUN_FLASHINFER=1',
-    )),
+    pytest.param('flashinfer', marks=pytest.mark.flashinfer),
 ])
-def test_real_text_matches_token_api_and_close_releases_model_and_kv(backend):
-    config = EngineConfig(
-        model=Path(model_path), attention_backend=backend,
-        max_model_len=256, max_num_seqs=4, max_num_batched_tokens=64,
-        prefill_chunk_size=16, prefill_reserve_tokens=0, prefill_reserve_requests=0,
-        kv_cache_memory_bytes=64 * 1024**2,
-    )
+def test_real_text_matches_token_api_and_close_releases_model_and_kv(backend, small_model_config):
+    config = small_model_config
     messages = [{'role': 'user', 'content': '请用一句话介绍你自己。'}]
     sampling = SamplingParams(max_new_tokens=8)
     with LLM(config) as llm:

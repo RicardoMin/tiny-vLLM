@@ -2,39 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import os
-from pathlib import Path
 import threading
 import weakref
 
 import pytest
 
-from tinyvllm import Engine, EngineConfig, GenerateRequest, SamplingParams, TokenEvent
+from tinyvllm import Engine, GenerateRequest, SamplingParams, TokenEvent
 from tinyvllm.async_engine import AsyncEngine
 from tinyvllm.request import CompletionEvent
 from tinyvllm.tokenizer import Tokenizer
 
 
-@pytest.mark.skipif(
-    not os.environ.get('TINYVLLM_MODEL') or os.environ.get('TINYVLLM_RUN_CUDA') != '1',
-    reason='set TINYVLLM_MODEL and TINYVLLM_RUN_CUDA=1',
-)
+@pytest.mark.cuda
+@pytest.mark.model
 @pytest.mark.parametrize('backend', [
     'reference', 'cuda',
-    pytest.param('flashinfer', marks=pytest.mark.skipif(
-        os.environ.get('TINYVLLM_RUN_FLASHINFER') != '1',
-        reason='set TINYVLLM_RUN_FLASHINFER=1',
-    )),
+    pytest.param('flashinfer', marks=pytest.mark.flashinfer),
 ])
-def test_real_owner_stream_matches_token_api_and_disposes_resources(backend, monkeypatch):
-    model_path = Path(os.environ['TINYVLLM_MODEL'])
-    config = EngineConfig(
-        model=model_path, attention_backend=backend,
-        max_model_len=256, max_num_seqs=4, max_num_batched_tokens=64,
-        prefill_chunk_size=16, prefill_reserve_tokens=0, prefill_reserve_requests=0,
-        kv_cache_memory_bytes=64 * 1024**2,
-    )
-    tokenizer = Tokenizer(model_path)
+def test_real_owner_stream_matches_token_api_and_disposes_resources(backend, monkeypatch, small_model_config):
+    config = small_model_config
+    tokenizer = Tokenizer(config.model)
     prompts = [tokenizer.encode_chat([{'role': 'user', 'content': text}]) for text in (
         '请用一句话介绍你自己。', '请介绍一下分页KV缓存。',
     )]

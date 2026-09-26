@@ -14,7 +14,8 @@ from tinyvllm.async_engine import (
 )
 from tinyvllm.config import EngineConfig
 from tinyvllm.engine import Engine, TokenEvent
-from tinyvllm.executor import CpuFakeExecutor, ExecutorCapabilities
+from tinyvllm.executor import ExecutorCapabilities
+from engine_helpers import CpuFakeExecutor
 from tinyvllm.request import CompletionEvent, RequestStatus, SamplingParams
 from tinyvllm.scheduler import Scheduler
 

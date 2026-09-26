@@ -7,6 +7,17 @@ from tinyvllm.request import SamplingParams
 from tinyvllm.sampling import TorchSampler
 
 
+@pytest.mark.parametrize('temperature', [1e-40, 1e-300])
+def test_tiny_positive_temperature_produces_valid_token(temperature):
+    params = SamplingParams(temperature=temperature)
+    result = TorchSampler().sample(
+        torch.tensor([[1.0, 2.0, 3.0]]),
+        (params,),
+        (42,),
+    )
+    assert result.tolist() == [2]
+
+
 def stochastic_params(
     *,
     seed: int = 0,
