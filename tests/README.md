@@ -63,3 +63,26 @@ CUDA 编译器路径、架构与依赖必须在运行前按本机环境配置。
 助手验证工作区的源码候选通过完整回归：364 passed（RTX 5060 Laptop、PyTorch 2.9.1+cu128、FlashInfer 0.3.1、本地 Qwen3-0.6B）。包含长 chunk 对当前 reference 的新门禁；没有用新容差替代旧阈值。这不是性能对比数据。
 
 测试直接同步，用户生产源码仍由用户按教程修改。新增 `test_qwen3.py::test_dimension_types_are_not_silently_coerced` 的三个入口分别验证 from_dict、本地模型目录、HF config 不接受被 int() 静默截断/转换的维度。在尚未落实 Qwen3Config.from_hf 修复的源码上，这三个用例应失败（DID NOT RAISE）；没有添加 xfail。其余测试对本轮用户基线兼容。
+
+
+## S3 HTTP/SSE（2026-09-26）
+
+用户已提交上述架构修复（2b9914b），先前三个配置类型用例的实施依赖已经解除。
+本轮新增 test_streaming_tokenizer.py、test_server.py、test_server_model.py；
+测试直接同步，需先按教程实现 tokenizer 增量接口、AsyncEngine 元数据与 server.py，
+再运行完整套件。尚未复现时出现缺少 StreamingDecoder/server 的导入错误属于源码未完成，不能 xfail 掩盖。
+
+安装可选网络依赖：`python -m pip install -e '.[server]'`。
+不安装 aiohttp 时，两个网络测试文件会跳过；启用完整网络测试必须安装此 extra。
+
+```bash
+python -m pytest -q tests/test_server.py tests/test_streaming_tokenizer.py
+TINYVLLM_MODEL="$HOME/models/Qwen3/Qwen3-0.6B" python -m pytest -q tests/test_streaming_tokenizer.py
+TINYVLLM_RUN_CUDA=1 TINYVLLM_RUN_FLASHINFER=1 TINYVLLM_MODEL="$HOME/models/Qwen3/Qwen3-0.6B" python -m pytest -q tests/test_server_model.py
+```
+
+HTTP 协议测试运行真实 localhost TCP 客户端，但执行器为确定性 CPU fake；
+发送背压/EOF 超时在真实 HTTP 请求中用受控 await 注入，不能当成实际慢网卡压测。
+真实 GPU 测试分别覆盖 reference、CUDA、FlashInfer，同配置单请求的 JSON/SSE 文本、reason、usage 一致。
+UTF-8 测试含跨 token 字符、最终不完整字节、special/padded ID 和真实 Qwen3 HF decode 对照。
+这些是正确性门禁，不是 HTTP 吞吐、SLO 或跨框架性能排名。

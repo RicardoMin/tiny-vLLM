@@ -1,7 +1,24 @@
 from __future__ import annotations
 
+import codecs
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+
+class StreamingDecoder:
+    """One request's UTF-8 state; token byte strings are shared and immutable."""
+
+    def __init__(self, token_bytes: Mapping[int, bytes]) -> None:
+        self._token_bytes = token_bytes
+        self._utf8 = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+
+    def push(self, token_id: int) -> str:
+        return self._utf8.decode(self._token_bytes.get(token_id, b""))
+
+
+    def finish(self) -> str:
+        return self._utf8.decode(b"", final=True)
 
 
 class Tokenizer:
@@ -16,6 +33,8 @@ class Tokenizer:
             trust_remote_code=False,
             use_fast=True,
         )
+
+        self._stream_bytes: dict[int, bytes] | None = None
 
 
     def encode(self, text: str) -> tuple[int, ...]:
@@ -71,3 +90,53 @@ class Tokenizer:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )
+
+
+    def stream_decoder(self) -> StreamingDecoder:
+        """Create request-local state for the currently supported ByteLevel format.
+        
+        Prepare the shared vocabulary once during service startup. ByteLevel's
+        Unicode alphabet encodes bytes, not necessarily complete UTF-8 characters.
+        """
+
+        if self._stream_bytes is None:
+            from tokenizers.decoders import ByteLevel
+
+            backend = self._tokenizer.backend_tokenizer
+            if not isinstance(backend.decoder, ByteLevel):
+                raise ValueError("streaming requires a ByteLevel tokenizer decoder")
+
+            byte_values = [*range(33, 127), *range(161, 173), *range(174, 256)]
+            code_points = byte_values.copy()
+            extra = 0
+
+            for value in range(256):
+                if value not in byte_values:
+                    byte_values.append(value)
+                    code_points.append(256 + extra)
+                    extra += 1
+
+            byte_decoder = {
+                chr(code_point): value
+                for value, code_point in zip(byte_values, code_points)
+            }
+
+            special_ids = {
+                token_id
+                for token_id, token in backend.get_added_tokens_decoder().items()
+                if token.special
+            }
+
+            try:
+                self._stream_bytes = {
+                    token_id: bytes(byte_decoder[char] for char in token)
+                    for token, token_id in backend.get_vocab().items()
+                    if token_id not in special_ids
+                }
+            except KeyError as error:
+                raise ValueError(
+                    "streaming requires a ByteLevel-compatible vocabulary"
+                ) from error
+
+                
+        return StreamingDecoder(self._stream_bytes)

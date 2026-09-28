@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = ["aiohttp>=3.12,<4"]
 kernels = ["ninja>=1.11", "setuptools>=75"]
 flashinfer = [
     "flashinfer-python==0.3.1",

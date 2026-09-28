@@ -129,6 +129,7 @@ class AsyncEngine:
             if type(value) is not int or value <= 0:
                 raise ValueError("bridge limits must be positive integers")
         self._config = config
+        self.eos_token_ids: frozenset[int] = frozenset()
         self._max_requests = max_requests
         self._max_reserved_tokens = max_reserved_tokens
         self._max_buffered_tokens = max_buffered_tokens
@@ -146,6 +147,12 @@ class AsyncEngine:
         self._ready: Future[str | None] = Future()
         self._done: Future[str | None] = Future()
         self._close_task: asyncio.Task | None = None
+
+        
+    @property
+    def is_running(self) -> bool:
+        with self._condition:
+            return self._ready.done() and not self._closing
 
 
     def _check_loop(self) -> None:
@@ -274,6 +281,7 @@ class AsyncEngine:
 
         try:
             engine = Engine.from_config(self._config)
+            self.eos_token_ids = frozenset(engine.scheduler.eos_token_ids)
             self._ready.set_result(None)
             while True:
                 with self._condition:

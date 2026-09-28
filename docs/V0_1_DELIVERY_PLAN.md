@@ -1,6 +1,6 @@
 # tiny-vLLM v0.1 交付路线
 
-更新：2026-09-23。用户已提交S1（5ae8a9b）；本轮交付S2异步token请求桥，助手验证与用户实施分别记录。
+更新：2026-09-26。用户已提交 S2 与 v0.1 架构收敛（2b9914b）。本轮交付 S3 HTTP/SSE；助手验证与用户实施分别记录，详见 MODULE_S3_HTTP.md。
 本文定义近期发布顺序；TINY_VLLM_V1_REFACTOR_PLAN.md保留长期技术路线。
 pyproject.toml中的0.1.0目前只是开发版本号，不代表下面的发布验收已经完成。
 
@@ -26,8 +26,8 @@ prefix cache/共享页、抢占重计算、TP、多GPU、量化、speculation、
 | KV与attention | 分页存储，CUDA单Query、融合store；可选FI历史多Query，默认reference |
 | 采样与输出 | 已有greedy/temperature/top-k/top-p/seed/EOS和TokenEvent/CompletionEvent |
 | 文本层 | S1已完成：tokenizer、chat template、完整detokenize、结构化输出、CLI |
-| 服务并发桥 | S2本轮：单owner线程、有界token异步流、取消与关闭；用户待复现 |
-| HTTP/SSE | S3待实现，没有现成网络服务 |
+| 服务并发桥 | S2已提交：单owner线程、有界token异步流、取消与关闭 |
+| HTTP/SSE | S3本轮候选：aiohttp、JSON/SSE、ByteLevel增量解码；用户待按教程复现 |
 | v0.1验收/正式对比 | S4待实现；现有benchmark主要是token层本地诊断 |
 
 ## S1：文本API与CLI（用户已提交5ae8a9b）
@@ -46,7 +46,7 @@ EOS从可见文本隐藏但计入原始tokens和usage；EOS/长度同时满足�
 完成标志：中文/emoji/空白round trip、模板一致、文本API与同后端token API输出ID一致、
 原始token计数、输入失败原子性、关闭/失败实际对象释放和真实CLI JSON可用。
 
-## S2：单owner工作线程与有界异步桥（当前模块）
+## S2：单owner工作线程与有界异步桥（用户已提交）
 
 HTTP事件循环只处理连接和协议。GPU Engine在专用线程内创建、执行和销毁，
 持续消费submit/cancel/shutdown命令，在step之间接收新请求；不为每个请求调用阻塞generate。
@@ -66,7 +66,7 @@ S3再将S1 tokenizer接入有界CPU处理与HTTP协议，不在S2重复实现Asy
 完成标志：交错到达形成mixed batch、取消在步骤边界生效、队列溢出、慢消费者、
 worker异常广播、重复关闭、所有等待者完成、blocks回收；无跨线程直接改scheduler状态。
 
-## S3：HTTP、SSE与增量文本（紧接S2）
+## S3：HTTP、SSE与增量文本（当前交付模块）
 
 薄协议层复用S2桥：GET /health、GET /v1/models，
 POST /v1/completions与POST /v1/chat/completions的明确文本子集。
