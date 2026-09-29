@@ -38,3 +38,12 @@ torch_compile_debug/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local development materials
+/tests/
+/docs/
+/benchmarks/
+/requirements/
+
+# Nsight Compute reports
+*.ncu-rep
