@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import asyncio
-
-from tinyvllm.serving.async_llm import AsyncLLM, TextDelta
-
 import argparse
+import asyncio
 from dataclasses import asdict
 import json
 from pathlib import Path
 
 from tinyvllm.config import EngineConfig
-from tinyvllm.serving.llm import LLM
+from tinyvllm.serving.async_llm import AsyncLLM, TextDelta
+from tinyvllm.serving.llm import LLM, TextOutput
+from tinyvllm.serving.terminal import chat_loop
 from tinyvllm.request import SamplingParams
 
 
@@ -27,6 +26,33 @@ async def _print_stream(config, args, messages, sampling) -> None:
                     print(event.text, end="", flush=True)
                     
         print()
+        
+        
+def _interactive_chat(config, args, sampling) -> None:
+    llm = AsyncLLM(config)
+    
+    async def turn(messages, on_text):
+        async with llm.chat_stream(
+            messages,
+            sampling,
+            enable_thinking=args.thinking,
+        ) as stream:
+            async for event in stream:
+                if isinstance(event, TextDelta):
+                    on_text(event.text)
+                elif isinstance(event, TextOutput):
+                    return event.text
+                
+    with asyncio.Runner() as runner:
+        runner.run(llm.__aenter__())
+        try:
+            chat_loop(
+                lambda messages, on_text: runner.run(turn(messages, on_text)),
+                system=args.system,
+                title=f"tiny-vLLM | local | {args.model.name}",
+            )
+        finally:
+            runner.run(llm.__aexit__(None, None, None))
 
 
 def main(argv=None) -> None:
@@ -35,6 +61,8 @@ def main(argv=None) -> None:
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--prompt", action="append", help="raw prompt; repeat for a batch")
     inputs.add_argument("--messages", type=Path, help="UTF-8 JSON chat message array")
+    inputs.add_argument("--chat", action="store_true", help="interactive local chat")
+    parser.add_argument("--system", default="", help="system prompt for --chat")
     parser.add_argument("--stream", action="store_true", help="print incremental text")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument(
@@ -56,8 +84,10 @@ def main(argv=None) -> None:
     parser.add_argument("--kv-cache-mib", type=int, default=512)
     args = parser.parse_args(argv)
 
-    if args.thinking and args.messages is None:
-        parser.error("--thinking requires --messages")
+    if args.thinking and args.messages is None and not args.chat:
+        parser.error("--thinking requires --messages or chat")
+    if args.system and not args.chat:
+        parser.error("--system requires --chat")
 
     if args.stream and args.prompt is not None and len(args.prompt) != 1:
         parser.error("--stream requires a single --prompt or --messages")
@@ -87,6 +117,9 @@ def main(argv=None) -> None:
         kv_cache_memory_bytes=args.kv_cache_mib * 1024**2,
     )
 
+    if args.chat:
+        _interactive_chat(config, args, sampling)
+        return
     if args.stream:
         asyncio.run(_print_stream(config, args, messages, sampling))
         return

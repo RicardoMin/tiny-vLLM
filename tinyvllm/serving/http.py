@@ -30,6 +30,7 @@ def _parse(body, *, chat: bool, model: str):
     fields = {
         "model",
         "stream",
+        "stream_options",
         "n",
         "max_tokens",
         "temperature",
@@ -52,6 +53,17 @@ def _parse(body, *, chat: bool, model: str):
     if type(body.get("stream", False)) is not bool:
         raise ValueError("stream must be bool")
 
+    options = body.get("stream_options")
+    include_usage = False
+    if options is not None:
+        if not body.get("stream", False):
+            raise ValueError("stream_options requires stream=true")
+        if not isinstance(options, dict) or options.keys() - {"include_usage"}:
+            raise ValueError("stream_options only supports include_usage")
+        include_usage = options.get("include_usage", False)
+        if type(include_usage) is not bool:
+            raise ValueError("include_usage must be bool")
+
     sampling = SamplingParams(
         max_new_tokens=body.get("max_tokens", 64),
         temperature=body.get("temperature", 0.0),
@@ -60,7 +72,7 @@ def _parse(body, *, chat: bool, model: str):
         seed=body.get("seed", 0),
         ignore_eos=body.get("ignore_eos", False),
     )
-    return sampling, body.get("stream", False)
+    return sampling, body.get("stream", False), include_usage
 
 
 def _error(message: str, kind: str) -> dict:
@@ -91,7 +103,6 @@ class _Server:
         max_buffered_tokens,
         request_timeout,
     ) -> None:
-        self.config = config
         self.model = model
         self.limit = max_requests
         self.timeout = request_timeout
@@ -168,7 +179,7 @@ class _Server:
             async with asyncio.timeout(self.timeout):
                 body = await request.json()
                 chat = request.path == "/v1/chat/completions"
-                sampling, streaming = _parse(
+                sampling, streaming, include_usage = _parse(
                     body,
                     chat=chat,
                     model=self.model,
@@ -193,6 +204,9 @@ class _Server:
                     "model": self.model,
                 }
 
+                if streaming and include_usage:
+                    common["usage"] = None
+
                 async with context as stream:
                     submitted = True
                     if streaming:
@@ -216,9 +230,14 @@ class _Server:
                         }
                         if streaming:
                             final = self._chunk(common, chat, reason=event.finish_reason)
-                            final["usage"] = usage
                             terminal_started = True
                             await _send(response, final)
+                            if include_usage:
+                                await _send(response, {
+                                    **final,
+                                    "choices": [],
+                                    "usage": usage,
+                                })
                             await _send(response, "[DONE]")
                             await response.write_eof()
                             return response
