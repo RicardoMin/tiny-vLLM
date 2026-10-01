@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from tinyvllm.config import EngineConfig
-from tinyvllm.engine import Engine, GenerateRequest
-from tinyvllm.request import RequestStatus, SamplingParams
-from tinyvllm.tokenizer import Tokenizer
-
+from tinyvllm.engine import Engine, GenerateRequest, RequestOutput
+from tinyvllm.request import CompletionEvent, RequestStatus, SamplingParams
+from tinyvllm.serving.tokenizer import Tokenizer
 
 @dataclass(frozen=True, slots=True)
 class TextOutput:
@@ -27,6 +26,31 @@ class TextOutput:
     @property
     def total_token_count(self) -> int:
         return self.prompt_token_count + self.completion_token_count
+
+        
+    @classmethod
+    def from_result(
+        cls,
+        result: RequestOutput | CompletionEvent,
+        text: str,
+        sampling: SamplingParams,
+        eos_token_ids: Collection[int],
+    ) -> TextOutput:
+        tokens = result.output_token_ids
+        if result.status is RequestStatus.ABORTED:
+            reason = "cancelled"
+        elif tokens and not sampling.ignore_eos and tokens[-1] in eos_token_ids:
+            reason = "stop"
+        else:
+            reason = "length"
+            
+        return cls(
+            request_id=result.request_id,
+            text=text,
+            output_token_ids=tokens,
+            prompt_token_count=result.prompt_token_count,
+            finish_reason=reason,
+        )
 
 
 class LLM:
@@ -91,32 +115,16 @@ class LLM:
             for tokens in token_batches
         )
         outputs = engine.generate(requests)
-        results = []
 
-        for output in outputs:
-            tokens = output.output_token_ids
-            if output.status is RequestStatus.ABORTED:
-                reason = "cancelled"
-            elif (
-                tokens
-                and not sampling.ignore_eos
-                and tokens[-1] in engine.scheduler.eos_token_ids
-            ):
-                reason = "stop"
-            else:
-                reason = "length"
-
-            results.append(
-                TextOutput(
-                    request_id=output.request_id,
-                    text=self.tokenizer.decode(tokens),
-                    output_token_ids=tokens,
-                    prompt_token_count=output.prompt_token_count,
-                    finish_reason=reason,
-                )
+        return [
+            TextOutput.from_result(
+                output,
+                self.tokenizer.decode(output.output_token_ids),
+                sampling,
+                engine.scheduler.eos_token_ids,
             )
-
-        return results
+            for output in outputs
+        ]
 
 
     def close(self) -> None:

@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import asyncio
+
+from tinyvllm.serving.async_llm import AsyncLLM, TextDelta
+
 import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
 
 from tinyvllm.config import EngineConfig
-from tinyvllm.llm import LLM
+from tinyvllm.serving.llm import LLM
 from tinyvllm.request import SamplingParams
+
+
+async def _print_stream(config, args, messages, sampling) -> None:
+    async with AsyncLLM(config) as llm:
+        context = (
+            llm.chat_stream(messages, sampling, enable_thinking=args.thinking)
+            if args.messages is not None
+            else llm.stream(args.prompt[0], sampling)
+        )
+        async with context as stream:
+            async for event in stream:
+                if isinstance(event, TextDelta):
+                    print(event.text, end="", flush=True)
+                    
+        print()
 
 
 def main(argv=None) -> None:
@@ -16,6 +35,7 @@ def main(argv=None) -> None:
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--prompt", action="append", help="raw prompt; repeat for a batch")
     inputs.add_argument("--messages", type=Path, help="UTF-8 JSON chat message array")
+    parser.add_argument("--stream", action="store_true", help="print incremental text")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument(
         "--attention-backend",
@@ -39,6 +59,9 @@ def main(argv=None) -> None:
     if args.thinking and args.messages is None:
         parser.error("--thinking requires --messages")
 
+    if args.stream and args.prompt is not None and len(args.prompt) != 1:
+        parser.error("--stream requires a single --prompt or --messages")
+        
     messages = None
     if args.messages is not None:
         messages = json.loads(args.messages.read_text(encoding="utf-8"))
@@ -63,6 +86,10 @@ def main(argv=None) -> None:
         prefill_reserve_requests=0,
         kv_cache_memory_bytes=args.kv_cache_mib * 1024**2,
     )
+
+    if args.stream:
+        asyncio.run(_print_stream(config, args, messages, sampling))
+        return
 
     with LLM(config) as llm:
         if args.messages is not None:

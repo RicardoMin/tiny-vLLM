@@ -15,7 +15,8 @@ from tinyvllm.engine import (
 )
 
 from tinyvllm.config import EngineConfig
-from tinyvllm.llm import LLM, TextOutput
+from tinyvllm.serving.llm import LLM, TextOutput
+from tinyvllm.serving.async_llm import AsyncLLM, TextDelta
 from tinyvllm.async_engine import (
     AsyncEngine,
     OverloadedError,
@@ -43,4 +44,6 @@ __all__ = [
     "GenerateRequest",
     "RequestOutput",
     "TokenEvent",
+    "AsyncLLM",
+    "TextDelta",
 ]

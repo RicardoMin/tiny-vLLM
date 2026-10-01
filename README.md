@@ -28,6 +28,30 @@ python -m tinyvllm \
   --max-new-tokens 64
 ```
 
+追加 `--stream` 可以即时打印文本；此时只接受一个 `--prompt`，也支持 `--messages` 聊天输入。
+
+服务入口集中在 `tinyvllm/serving/`。公开 Python API 保持 `from tinyvllm import LLM, AsyncLLM`：
+`LLM.generate/chat` 返回完整结果；`AsyncLLM.generate/chat` 是异步完整结果，`stream/chat_stream` 是请求上下文中的增量文本流。
+流先产生 `TextDelta`，最后产生一个 `TextOutput`；提前退出应使用 `async with`，及时取消请求并回收 KV。
+
+启动 HTTP 服务（默认仅监听本机）：
+
+```bash
+python -m tinyvllm.server \
+  --model "$HOME/models/Qwen3/Qwen3-0.6B" \
+  --attention-backend cuda
+```
+
+另一个终端请求聊天流：
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3-0.6B","messages":[{"role":"user","content":"简述 KV Cache。"}],"max_tokens":64,"stream":true}'
+```
+
+也支持 `/v1/completions`、`/v1/models`、`/health`。本项目的 SSE 子集在结束帧中提供 `finish_reason` 和 `usage`，随后发送 `[DONE]`；客户端必须检查 `error`，不能只凭 `[DONE]` 判定成功。服务端提供请求/输出容量限制、超时和断连取消。
+
 尚不支持 TP/多 GPU、量化、多模态、工具调用或投机解码；HTTP 接口只实现明确的文本请求子集，不声明完整兼容其他服务的全部参数。
 
 ## 与 nano-vLLM 的开发阶段比较
