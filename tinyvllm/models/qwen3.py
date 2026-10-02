@@ -203,23 +203,12 @@ class Qwen3Config:
         return getattr(self._hf_config, name)
 
     @property
-    def num_key_value_groups(self) -> int:
-        return (
-            self.num_attention_heads
-            // self.num_key_value_heads
-        )
-
-    @property
     def q_proj_size(self) -> int:
         return self.num_attention_heads * self.head_dim
 
     @property
     def kv_proj_size(self) -> int:
         return self.num_key_value_heads * self.head_dim
-
-    @property
-    def qkv_proj_size(self) -> int:
-        return self.q_proj_size + 2 * self.kv_proj_size
 
 
 class Qwen3Attention(nn.Module):

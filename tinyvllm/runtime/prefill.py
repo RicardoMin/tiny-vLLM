@@ -66,8 +66,12 @@ class PagedPrefill:
                 self.workspace, "NHD", backend="fa2",
             )
             self._plan(([0,2], [0,1], [0], [2]))
-        except Exception:
-            self.close()
+        except Exception as cause:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                cause.add_note(f"paged prefill cleanup: {cleanup_error!r}")
+                
             raise
 
 

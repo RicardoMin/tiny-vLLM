@@ -659,11 +659,7 @@ class Scheduler:
                 request.inflight_plan_id = None
 
                 if not item.should_sample:
-                    if request.computed_tokens >= self.max_model_len:
-                        self._finish_request(request, now_ns)
-                        finished_ids.append(request.request_id)
-                    else:
-                        self._prefill_ids.append(request.request_id)
+                    self._prefill_ids.append(request.request_id)
                     continue
 
                 token_id = result.sampled_token_ids[sample_index]

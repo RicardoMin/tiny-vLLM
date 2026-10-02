@@ -142,9 +142,6 @@ class BlockPool():
             raise ValueError(
                 "reservation is not open in this pool"
             )
-        for ref in reservation.block_refs:
-            if self.state(ref) is not BlockState.RESERVED:
-                raise RuntimeError("block is not reserved")
 
 
 class BlockTxnState(Enum):

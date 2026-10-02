@@ -107,6 +107,9 @@ class AsyncLLM:
     
     
     async def __aexit__(self, exc_type, exc, traceback) -> None:
+        if asyncio.get_running_loop() is not self._loop:
+            raise RuntimeError("use the event loop that started this AsyncLLM")
+        
         await self._lifetime.__aexit__(exc_type, exc, traceback)
         
         

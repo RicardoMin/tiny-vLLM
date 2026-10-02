@@ -63,9 +63,12 @@ class ModelRunner:
                 device=self.device,
                 dtype=parameter.dtype,
             )
-        except Exception:
+        except Exception as cause:
             if self.prefill is not None:
-                self.prefill.close()
+                try:
+                    self.prefill.close()
+                except Exception as cleanup_error:
+                    cause.add_note(f"paged prefill cleanup: {cleanup_error!r}")
 
             raise
 

@@ -52,6 +52,8 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 
 也支持 `/v1/completions`、`/v1/models`、`/health`。本项目的 SSE 子集在结束帧中提供 `finish_reason` 和 `usage`，随后发送 `[DONE]`；客户端必须检查 `error`，不能只凭 `[DONE]` 判定成功。服务端提供请求/输出容量限制、超时和断连取消。
 
+本地多轮聊天使用 `python -m tinyvllm --model "$HOME/models/Qwen3/Qwen3-0.6B" --attention-backend cuda --chat`；连接已启动的 HTTP 服务使用 `python -m tinyvllm.chat`。两种入口支持 `--system`、`/help`、`/reset`、`/exit`，生成期间 Ctrl-C 取消当前轮；失败或取消不加入历史。历史只在客户端内存保存，每轮重新提交，尚无跨轮 KV 复用。
+
 尚不支持 TP/多 GPU、量化、多模态、工具调用或投机解码；HTTP 接口只实现明确的文本请求子集，不声明完整兼容其他服务的全部参数。
 
 ## 与 nano-vLLM 的开发阶段比较

@@ -50,7 +50,7 @@ class ModelInput:
     input_ids: torch.Tensor
     positions: torch.Tensor
     sample_token_indices: torch.Tensor
-    kv: PagedKVMetadata | None
+    kv: PagedKVMetadata
 
     @classmethod
     def from_prepared_batch(

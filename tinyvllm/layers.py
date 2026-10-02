@@ -7,6 +7,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+from tinyvllm._validation import _check_positive_int
 
 
 class PackedLinear(nn.Module):
@@ -23,17 +24,15 @@ class PackedLinear(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.input_size = int(input_size)
-
-        if self.input_size <= 0:
-            raise ValueError("input_size must be positive")
-        self.output_sizes = tuple(int(size) for size in output_sizes)
+        _check_positive_int("input_size", input_size)
+        self.input_size = input_size
+        self.output_sizes = tuple(output_sizes)
 
         if not self.output_sizes:
             raise ValueError("output_sizes must be non-empty")
 
-        if min(self.output_sizes) <= 0:
-            raise ValueError("output sizes must be positive")
+        for size in self.output_sizes:
+            _check_positive_int("output_size", size)
 
         if shard_names is None:
             shard_names = tuple(
@@ -75,9 +74,6 @@ class PackedLinear(nn.Module):
 
         self.reset_parameters()
 
-    @property
-    def output_size(self) -> int:
-        return sum(self.output_sizes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight)
