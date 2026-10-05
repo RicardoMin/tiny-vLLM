@@ -7,7 +7,9 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+
 from tinyvllm._validation import _check_positive_int
+from tinyvllm.kernels.pointwise import rms_norm, silu_and_mul
 
 
 class PackedLinear(nn.Module):
@@ -147,12 +149,7 @@ class RMSNorm(nn.Module):
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        values = x.float()
-        variance = values.square().mean(dim=-1, keepdim=True)
-        normalized = values * torch.rsqrt(variance + self.eps)
-        return self.weight * normalized.to(x.dtype)
-
-
+        return rms_norm(x, self.weight, self.eps)
 class RotaryEmbedding(nn.Module):
     """Half-split rotary position embedding for flat token positions."""
 
@@ -218,32 +215,28 @@ class RotaryEmbedding(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
+        dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather and cast one pair for all attention layers in this forward."""
         cos = self.cos.index_select(
             0,
             positions,
-        ).unsqueeze(1)
+        ).to(dtype).unsqueeze(1)
 
         sin = self.sin.index_select(
             0,
             positions,
-        ).unsqueeze(1)
+        ).to(dtype).unsqueeze(1)
 
-        return (
-            self._rotate(query, cos, sin),
-            self._rotate(key, cos, sin),
-        )
+        return cos, sin
 
 
     @staticmethod
-    def _rotate(
+    def rotate(
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        cos, sin = cos.to(x.dtype), sin.to(x.dtype)
         first, second = x.chunk(2, dim=-1)
         return torch.cat(
             (
@@ -258,5 +251,4 @@ class SiluAndMul(nn.Module):
     """Compute silu(gate) * up for a packed MLP activation."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate, up = x.chunk(2, dim=-1)
-        return F.silu(gate) * up
+        return silu_and_mul(x)

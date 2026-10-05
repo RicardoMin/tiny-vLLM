@@ -215,7 +215,6 @@ class Qwen3Attention(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,
-        rotary_emb: RotaryEmbedding,
         *,
         device: torch.device | str | None,
         dtype: torch.dtype | None,
@@ -226,7 +225,6 @@ class Qwen3Attention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         self.scale = self.head_dim**-0.5
-        self.rotary_emb = rotary_emb
 
         self.qkv_proj = PackedLinear(
             config.hidden_size,
@@ -264,7 +262,7 @@ class Qwen3Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         *,
         layer_idx: int,
         attention: AttentionBackend,
@@ -300,11 +298,9 @@ class Qwen3Attention(nn.Module):
             self.head_dim,
         )
 
-        q, k = self.rotary_emb(
-            positions,
-            q,
-            k,
-        )
+        cos, sin = position_embeddings
+        q = RotaryEmbedding.rotate(q, cos, sin)
+        k = RotaryEmbedding.rotate(k, cos, sin)
 
         output = attention(layer_idx, q, k, v, scale=self.scale)
 
@@ -349,7 +345,7 @@ class Qwen3MLP(nn.Module):
     ) -> torch.Tensor:
         return self.down_proj(
             self.act_fn(
-                self.gate_up_proj(hidden_states)
+                self.gate_up_proj(hidden_states),
             )
         )
 
@@ -358,7 +354,6 @@ class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Qwen3Config,
-        rotary_emb: RotaryEmbedding,
         *,
         device: torch.device | str | None,
         dtype: torch.dtype | None,
@@ -374,7 +369,6 @@ class Qwen3DecoderLayer(nn.Module):
 
         self.self_attn = Qwen3Attention(
             config,
-            rotary_emb,
             device=device,
             dtype=dtype,
         )
@@ -396,7 +390,7 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         *,
         layer_idx: int,
         attention: AttentionBackend,
@@ -408,7 +402,7 @@ class Qwen3DecoderLayer(nn.Module):
         )
         hidden_states = residual + self.self_attn(
             hidden_states,
-            positions,
+            position_embeddings,
             layer_idx=layer_idx,
             attention=attention,
         )
@@ -454,7 +448,6 @@ class Qwen3Model(nn.Module):
         self.layers = nn.ModuleList(
             Qwen3DecoderLayer(
                 config,
-                self.rotary_emb,
                 device=device,
                 dtype=dtype,
             )
@@ -492,9 +485,14 @@ class Qwen3Model(nn.Module):
             )
 
         hidden_states = self.embed_tokens(input_ids)
+        position_embeddings = self.rotary_emb(positions, hidden_states.dtype)
+
         for layer_idx, layer in enumerate(self.layers):
             hidden_states = layer(
-                hidden_states, positions, layer_idx=layer_idx, attention=attention,
+                hidden_states,
+                position_embeddings,
+                layer_idx=layer_idx,
+                attention=attention,
             )
 
         return self.norm(hidden_states)
