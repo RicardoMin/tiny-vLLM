@@ -291,9 +291,9 @@ def select_attention_backend(name: str, model: torch.nn.Module):
             "query heads must be divisible by KV heads"
         )
 
-    # Compile/load before allocating KV; CPU/reference users need no toolkit.
-    from tinyvllm.kernels.paged_decode import load_paged_decode
+    # Complie/Load CUDA attention kernels before allocating KV.
+    from tinyvllm.kernels._extension import load_cuda_kernels
 
-    load_paged_decode()
+    load_cuda_kernels()
 
     return FlashInferAttention if name == "flashinfer" else CudaAttention
