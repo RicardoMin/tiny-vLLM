@@ -68,7 +68,7 @@ class DecodeInputs:
         
         
     def prepare(self, batch: PreparedBatch) -> ModelInput | None:
-        """Reuse storage for validated, fully smapled single-query batches."""
+        """Reuse storage for validated, fully sampled single-query batches."""
 
         if torch.cuda.current_stream(self.device) != self.stream:
             raise RuntimeError("CUDA runner must stay on its creation stream")
@@ -84,9 +84,18 @@ class DecodeInputs:
         if table_size > self.table_capacity:
             raise ValueError("batch exceeds decode input block-table capacity")
 
-        # GPU stream ordering cannot protect host memory from on early CPU write.
+        # GPU stream ordering cannot protect host memory from an early CPU write.
         if self.uploaded:
             self.upload_done.synchronize()
+
+        # Reset stale rows from a previously larger batch before one H2D copy.
+        tokens, positions, slots, offsets, lengths, _ = self.host_views
+        
+        tokens[count:] = 0
+        positions[count:] = 0
+        slots[count:] = -1
+        offsets[count + 1:] = table_size
+        lengths[count:] = 0
             
         values = (
             batch.input_ids,
@@ -103,7 +112,13 @@ class DecodeInputs:
         self.device_data[:size].copy_(self.host[:size], non_blocking=True)
         self.upload_done.record(self.stream)
         self.uploaded = True
+
+        return self.view(count, table_size)
         
+
+    def view(self, count: int, table_size: int | None = None) -> ModelInput:
+        """Borrow fixed storage; graph capture uses the full block-table capacity."""
+
         tokens, positions, slots, offsets, lengths, blocks = self.device_views
         rows = self.rows[:count]
         return ModelInput(

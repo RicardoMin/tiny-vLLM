@@ -9,6 +9,7 @@ from tinyvllm.paged_kv import PagedKVCache
 from tinyvllm.runtime.attention import select_attention_backend
 from tinyvllm.runtime.contracts import ModelInput
 from tinyvllm.runtime.inputs import DecodeInputs
+from tinyvllm.runtime.graphs import DecodeGraphs
 
 
 class ModelRunner:
@@ -22,8 +23,11 @@ class ModelRunner:
         num_blocks: int,
         max_model_len: int | None = None,
         max_num_seqs: int = 64,
-        attention_backend: str = "cuda"
+        attention_backend: str = "cuda",
+        enforce_eager: bool = False,
     ) -> None:
+        if type(enforce_eager) is not bool:
+            raise TypeError("enforce_eager must be bool")
         self.model = model.eval()
         self.attention_type = select_attention_backend(
             attention_backend,
@@ -32,6 +36,8 @@ class ModelRunner:
         self.paged_decode = attention_backend != "reference"
         self.prefill = None
         self.decode_inputs = None
+        self.decode_graphs = None
+        self.kv_cache = None
 
         parameter = next(self.model.parameters())
         self.device = parameter.device
@@ -74,12 +80,20 @@ class ModelRunner:
                 device=self.device,
                 dtype=parameter.dtype,
             )
+            
+            if self.decode_inputs is not None and not enforce_eager:
+                self.decode_graphs = DecodeGraphs(self.decode_inputs.stream)
+
+                self.decode_graphs.capture(
+                    model,
+                    self.decode_inputs,
+                    self.kv_cache,
+                )
         except Exception as cause:
-            if self.prefill is not None:
-                try:
-                    self.prefill.close()
-                except Exception as cleanup_error:
-                    cause.add_note(f"paged prefill cleanup: {cleanup_error!r}")
+            try:
+                self.clear()
+            except Exception as cleanup_error:
+                cause.add_note(f"runner cleanup: {cleanup_error!r}")
 
             raise
 
@@ -163,6 +177,7 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run(self, batch: PreparedBatch) -> torch.Tensor | None:
+        """Return borrowed logits; consume or clone before the next run."""
         cache = self.kv_cache
         if cache is None:
             raise RuntimeError("runner is closed")
@@ -174,6 +189,11 @@ class ModelRunner:
             if self.decode_inputs is not None
             else None
         )
+        if model_input is not None and self.decode_graphs is not None:
+            logits = self.decode_graphs.replay(batch.num_items)
+
+            if logits is not None:
+                return logits
         if model_input is None:
             model_input = ModelInput.from_prepared_batch(
                 batch, 
@@ -211,10 +231,15 @@ class ModelRunner:
     def clear(self) -> None:
         # Final resource disposal; ordinary completion only recycles blocks.
         try:
-            if self.prefill is not None:
-                self.prefill.close()
+            if self.decode_graphs is not None:
+                self.decode_graphs.close()
         finally:
-            self.prefill = None
-            self.decode_inputs = None
-            self.kv_cache = None
-            self.model = None
+            try:
+                if self.prefill is not None:
+                    self.prefill.close()
+            finally:
+                self.decode_graphs = None
+                self.prefill = None
+                self.decode_inputs = None
+                self.kv_cache = None
+                self.model = None

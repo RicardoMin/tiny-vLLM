@@ -149,6 +149,31 @@ def create_engine(config: EngineConfig) -> Engine:
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         attention_backend=config.attention_backend,
+        enforce_eager=config.enforce_eager,
     )
 
-    return Engine(scheduler, executor)
+    try:
+        # Graph pools and library workspaces are measured after initialization.
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        
+        if total_bytes - free_bytes > int(
+            total_bytes * config.gpu_memory_utilization
+        ):
+            raise ValueError(
+                "initialized engine exceeds GPU usage ceiling; "
+                "lower kv_cache_memory_bytes, set enfore_eager=True, "
+                "or free device memory"
+            )
+
+        return Engine(scheduler, executor)
+
+    except Exception as cause:
+        try:
+            executor.clear()
+        except Exception as cleanup_error:
+            cause.add_note(f"executor cleanup: {cleanup_error}")
+
+        raise

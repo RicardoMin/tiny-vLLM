@@ -36,7 +36,14 @@ __global__ void store_kv_kernel(
     Strides vs
 ) {
     const int64_t token = blockIdx.x;
-    const int64_t destination = slots[token] * width;
+    const int64_t slot = slots[token];
+
+    // Graph padding owns no physical KV slot.
+    if (slot == -1) {
+        return;
+    }
+
+    const int64_t destination = slot * width;
 
     if constexpr (Vectorized) {
         for (
@@ -167,7 +174,7 @@ void store_kv(
         );
     }
 
-    // Slot values and uniqueness belong to the validated CPU batch contract.
+    // Real slots are CPU-validated and unique; -1 marks internal graph padding.
     if (slots.numel() == 0) {
         return;
     }

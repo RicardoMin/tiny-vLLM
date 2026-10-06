@@ -16,7 +16,7 @@ def paged_decode_attention(
     *,
     scale: float,
 ) -> None:
-    """Fill selected query rows on PyTorch's current CUDA stream."""
+    """Fill selected rows on the current stream; zero-length padding yields zeros."""
     load_cuda_kernels()
 
     torch.ops.tinyvllm_cuda.paged_decode(

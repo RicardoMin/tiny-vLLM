@@ -9,8 +9,8 @@ from tinyvllm.batch import PreparedBatch
 from tinyvllm.paged_kv import PagedKVCache
 from tinyvllm.runtime.contracts import ModelInput
 
-class ReferenceAttention:
-    """Paged storage plus per-request gather/SDPA, sharing one model forward"""
+class SDPAAttention:
+    """Gather/SDPA implementation, also shared by CUDA multi-query prefill."""
 
     def __init__(
         self,
@@ -148,7 +148,7 @@ class ReferenceAttention:
             )
 
 
-class CudaAttention(ReferenceAttention):
+class CudaAttention(SDPAAttention):
     """Fused KV writes, paged decode and fused causal chunk attention."""
 
     def _make_mask(
@@ -265,7 +265,7 @@ def select_attention_backend(name: str, model: torch.nn.Module):
     """Select once at construction; an explicitly requested backend must work."""
 
     if name == "reference":
-        return ReferenceAttention
+        return SDPAAttention
 
     if name not in ("cuda", "flashinfer"):
         raise ValueError(f"unsupported attention backend: {name}")
@@ -291,7 +291,7 @@ def select_attention_backend(name: str, model: torch.nn.Module):
             "query heads must be divisible by KV heads"
         )
 
-    # Complie/Load CUDA attention kernels before allocating KV.
+    # Compile/Load CUDA attention kernels before allocating KV.
     from tinyvllm.kernels._extension import load_cuda_kernels
 
     load_cuda_kernels()

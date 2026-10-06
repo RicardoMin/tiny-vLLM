@@ -125,6 +125,16 @@ __global__ void paged_decode_kernel(
 
     const int64_t row = rows[request];
     const int64_t length = lengths[request];
+
+    // Padded rows have no context. Do not read Q, block tables or KV.
+    if (length == 0) {
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            output[row * os0 + head * os1 + d * os2] = scalar_t(0.f);
+        }
+
+        return;
+    }
+
     const int64_t table_start = offsets[request];
 
     __shared__ int64_t slots[kTile];
@@ -468,7 +478,7 @@ void paged_decode(
     double scale,
     int64_t block_size
 ) {
-    // Index values are validated on CPU by ModelRunner.
+    // Real indices are CPU-validated; internal graph padding uses length=0.
     TORCH_CHECK(
         q.is_cuda() && q.dim() == 3,
         "Q must be a CUDA [tokens, heads, dim] tensor"

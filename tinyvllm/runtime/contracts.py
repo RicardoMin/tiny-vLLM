@@ -26,7 +26,7 @@ class AttentionBackend(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SingleQueryMetadata:
-    """Packed block tables for requests that append exactly one token."""
+    """Single-query tables; context_len=0 denotes internal graph padding."""
 
     query_rows: torch.Tensor
     block_table_ids: torch.Tensor
@@ -74,7 +74,7 @@ class ModelInput:
         }
         read_slots = []
         query_rows, block_ids, table_offsets, context_lens = [], [], [0], []
-        reference_tables = None
+        gather_tables = None
 
         if not paged_decode or ( 
             not paged_prefill
@@ -107,7 +107,8 @@ class ModelInput:
                 # Fresh queries use current K/V; paged prefill reads blocks.
                 read_slots.append(None)
             else:
-                # Reference prefill still gathers history in logical order.
+                # Gather histor:28
+                # ical K/V in logical order for SDPA.
                 positions = torch.arange(length, **kwargs)
                 physical = reference_tables[first:last].index_select(
                     0, positions // batch.kv_block_size,

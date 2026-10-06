@@ -27,6 +27,7 @@ class EngineConfig:
     prefill_chunk_size: int = 512
     prefill_reserve_tokens: int = 128
     prefill_reserve_requests: int = 1
+    enforce_eager: bool = False
 
     def __post_init__(self) -> None:
         model = Path(self.model).expanduser().resolve()
@@ -41,6 +42,9 @@ class EngineConfig:
             raise ValueError(
                 f"unsupported attention backend: {self.attention_backend}"
             )
+
+        if type(self.enforce_eager) is not bool:
+            raise TypeError("enforce_eager must be bool")
 
         for name in (
             "max_model_len",

@@ -13,7 +13,7 @@ def store_kv(
     key: torch.Tensor,
     value: torch.Tensor,
 ) -> None:
-    """Scatter both tensors in one launch; CPU validation owns slot values."""
+    """Scatter CPU-validated real slots; -1 skips internal graph padding."""
     cache._check_indices(layer_idx, slots)
     load_cuda_kernels()
 

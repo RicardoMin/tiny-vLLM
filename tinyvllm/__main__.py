@@ -77,6 +77,11 @@ def main(argv=None) -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ignore-eos", action="store_true")
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA Graph capture to save memory and startup time",
+    )
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
@@ -108,6 +113,7 @@ def main(argv=None) -> None:
         model=args.model,
         dtype=args.dtype,
         attention_backend=args.attention_backend,
+        enforce_eager=args.enforce_eager,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,

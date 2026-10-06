@@ -80,6 +80,7 @@ class Executor:
         sampler: TorchSampler | None = None,
         max_num_seqs: int = 64,
         attention_backend: str = "cuda",
+        enforce_eager: bool = False,
     ) -> None:
         self.runner = ModelRunner(
             model,
@@ -88,6 +89,7 @@ class Executor:
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
             attention_backend=attention_backend,
+            enforce_eager=enforce_eager,
         )
 
         self.capabilities = ExecutorCapabilities(
