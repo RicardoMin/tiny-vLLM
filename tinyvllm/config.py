@@ -16,7 +16,7 @@ DType = Literal["bfloat16", "float16"]
 class EngineConfig:
     model: Path
     dtype: DType = "bfloat16"
-    attention_backend: Literal["reference", "cuda", "flashinfer"] = "reference"
+    attention_backend: Literal["reference", "cuda", "flashinfer"] = "cuda"
     max_model_len: int = 4096
     max_num_seqs: int = 64
     max_num_batched_tokens: int = 4096

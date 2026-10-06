@@ -391,7 +391,7 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--attention-backend",
         choices=("reference", "cuda", "flashinfer"),
-        default="reference",
+        default="cuda",
     )
     parser.add_argument(
         "--dtype",

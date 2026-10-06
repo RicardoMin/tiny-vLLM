@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from tinyvllm.config import EngineConfig
+from tinyvllm.runtime.inputs import DecodeInputs
 
 if TYPE_CHECKING:
     from tinyvllm.engine import Engine
@@ -101,6 +102,13 @@ def create_engine(config: EngineConfig) -> Engine:
 
     reserved_bytes = 0
 
+    if config.attention_backend != "reference":
+        reserved_bytes = DecodeInputs.device_bytes(
+            max_num_seqs=config.max_num_seqs,
+            max_model_len=config.max_model_len,
+            block_size=config.kv_block_size,
+        )
+
     if config.attention_backend == "flashinfer":
         from tinyvllm.runtime.prefill import PREFILL_DEVICE_BYTES
 
@@ -110,7 +118,7 @@ def create_engine(config: EngineConfig) -> Engine:
             * (torch.finfo(dtype).bits // 8)
         )
 
-        reserved_bytes = PREFILL_DEVICE_BYTES + compact_bytes
+        reserved_bytes += PREFILL_DEVICE_BYTES + compact_bytes
 
     num_blocks = _plan_kv_blocks(
         total_bytes=total_bytes,
@@ -139,6 +147,7 @@ def create_engine(config: EngineConfig) -> Engine:
         block_size=config.kv_block_size,
         num_blocks=num_blocks,
         max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
         attention_backend=config.attention_backend,
     )
 

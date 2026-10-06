@@ -68,7 +68,7 @@ def main(argv=None) -> None:
     parser.add_argument(
         "--attention-backend",
         choices=("reference", "cuda", "flashinfer"),
-        default="reference",
+        default="cuda",
     )
     parser.add_argument("--dtype", choices=("bfloat16", "float16"), default="bfloat16")
     parser.add_argument("--max-new-tokens", type=int, default=64)

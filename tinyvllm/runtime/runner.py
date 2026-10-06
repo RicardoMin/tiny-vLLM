@@ -8,6 +8,7 @@ from tinyvllm.batch import PreparedBatch
 from tinyvllm.paged_kv import PagedKVCache
 from tinyvllm.runtime.attention import select_attention_backend
 from tinyvllm.runtime.contracts import ModelInput
+from tinyvllm.runtime.inputs import DecodeInputs
 
 
 class ModelRunner:
@@ -20,7 +21,8 @@ class ModelRunner:
         block_size: int,
         num_blocks: int,
         max_model_len: int | None = None,
-        attention_backend: str = "reference"
+        max_num_seqs: int = 64,
+        attention_backend: str = "cuda"
     ) -> None:
         self.model = model.eval()
         self.attention_type = select_attention_backend(
@@ -29,6 +31,7 @@ class ModelRunner:
         )
         self.paged_decode = attention_backend != "reference"
         self.prefill = None
+        self.decode_inputs = None
 
         parameter = next(self.model.parameters())
         self.device = parameter.device
@@ -54,6 +57,14 @@ class ModelRunner:
             )
 
         try:
+            if self.paged_decode:
+                self.decode_inputs = DecodeInputs(
+                    max_num_seqs=max_num_seqs,
+                    max_model_len=max_model_len,
+                    block_size=block_size,
+                    device=self.device,
+                )
+            
             self.kv_cache: PagedKVCache | None = PagedKVCache(
                 num_layers=config.num_hidden_layers,
                 num_blocks=num_blocks,
@@ -158,12 +169,18 @@ class ModelRunner:
 
         # All value/range checks happen on CPU, before transfers or KV writes.
         self._validate(batch, cache)
-        model_input = ModelInput.from_prepared_batch(
-            batch, 
-            device=self.device,
-            paged_decode=self.paged_decode,
-            paged_prefill=self.prefill is not None,
+        model_input = (
+            self.decode_inputs.prepare(batch)
+            if self.decode_inputs is not None
+            else None
         )
+        if model_input is None:
+            model_input = ModelInput.from_prepared_batch(
+                batch, 
+                device=self.device,
+                paged_decode=self.paged_decode,
+                paged_prefill=self.prefill is not None,
+            )
 
         try:
             if self.prefill is None:
@@ -198,5 +215,6 @@ class ModelRunner:
                 self.prefill.close()
         finally:
             self.prefill = None
+            self.decode_inputs = None
             self.kv_cache = None
             self.model = None

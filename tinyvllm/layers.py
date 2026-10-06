@@ -150,6 +150,8 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return rms_norm(x, self.weight, self.eps)
+
+
 class RotaryEmbedding(nn.Module):
     """Half-split rotary position embedding for flat token positions."""
 

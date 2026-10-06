@@ -78,13 +78,15 @@ class Executor:
         num_blocks: int,
         max_model_len: int | None = None,
         sampler: TorchSampler | None = None,
-        attention_backend: str = "reference",
+        max_num_seqs: int = 64,
+        attention_backend: str = "cuda",
     ) -> None:
         self.runner = ModelRunner(
             model,
             block_size=block_size,
             num_blocks=num_blocks,
             max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
             attention_backend=attention_backend,
         )
 
