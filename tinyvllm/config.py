@@ -28,6 +28,7 @@ class EngineConfig:
     prefill_reserve_tokens: int = 128
     prefill_reserve_requests: int = 1
     enforce_eager: bool = False
+    enable_prefix_caching: bool = True
 
     def __post_init__(self) -> None:
         model = Path(self.model).expanduser().resolve()
@@ -43,8 +44,9 @@ class EngineConfig:
                 f"unsupported attention backend: {self.attention_backend}"
             )
 
-        if type(self.enforce_eager) is not bool:
-            raise TypeError("enforce_eager must be bool")
+        for name in ("enforce_eager", "enable_prefix_caching"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be bool")
 
         for name in (
             "max_model_len",

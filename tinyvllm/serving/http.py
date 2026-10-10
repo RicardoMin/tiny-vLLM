@@ -403,6 +403,11 @@ def main(argv=None) -> None:
         action="store_true",
         help="Disable CUDA Graph capture to save memory and startup time",
     )
+    parser.add_argument(
+        "--disable-prefix-cache",
+        action="store_true",
+        help="Disable reuse of computed prefix KV blocks",
+    )
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
@@ -420,6 +425,7 @@ def main(argv=None) -> None:
         dtype=args.dtype,
         attention_backend=args.attention_backend,
         enforce_eager=args.enforce_eager,
+        enable_prefix_caching=not args.disable_prefix_cache,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,

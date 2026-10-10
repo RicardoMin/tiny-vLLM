@@ -24,6 +24,8 @@ from tinyvllm.cache import (
     BlockAppend,
     BlockManager,
     BlockPlanTxn,
+    BlockRef,
+    BlockState,
 )
 
 
@@ -100,6 +102,7 @@ class Scheduler:
         kv_block_size: int = 16,
         kv_num_blocks: int | None = None,
         eos_token_ids: Iterable[int] | None = None,
+        enable_prefix_caching: bool = True,
     ) -> None:
         _check_positive_int("max_active_requests", max_active_requests)
         _check_positive_int("max_step_requests", max_step_requests)
@@ -149,6 +152,7 @@ class Scheduler:
         self._block_manager = BlockManager(
             block_size=kv_block_size,
             num_blocks=kv_num_blocks,
+            enable_prefix_caching=enable_prefix_caching,
         )
 
         self._eos_token_ids = _normalize_token_ids("eos_token_ids", eos_token_ids)
@@ -419,6 +423,8 @@ class Scheduler:
             (
                 self._requests[request_id],
                 self._requests[request_id].active_slot,
+                self._requests[request_id].computed_tokens,
+                (),
             )
             for request_id in self._prefill_ids
         ]
@@ -534,6 +540,12 @@ class Scheduler:
             items=tuple(items),
         )
 
+        matched_prefixes = {
+            request.request_id: prefix 
+            for request, _, _, prefix in prefill_candidates
+            if prefix
+        }
+
         kv_txn = self._block_manager.begin_plan(
             plan_id=plan.plan_id,
             appends=tuple(
@@ -541,6 +553,7 @@ class Scheduler:
                     request_id=item.request_id,
                     token_start=item.token_start,
                     query_len=item.query_len,
+                    prefix=matched_prefixes.get(item.request_id, ()),
                 )
                 for item in plan.items
             ),
@@ -657,6 +670,11 @@ class Scheduler:
                 request = self._requests[item.request_id]
                 request.computed_tokens = item.token_end
                 request.inflight_plan_id = None
+
+                self._block_manager.cache_full_blocks(
+                    request.request_id,
+                    request.token_slice,
+                )
 
                 if not item.should_sample:
                     self._prefill_ids.append(request.request_id)
@@ -781,8 +799,11 @@ class Scheduler:
         ) // self.kv_block_size
 
 
-    def _admission_candidates(self) -> list[tuple[RequestState, int]]:
-        remaining_blocks = self._block_manager.pool.num_blocks
+    def _admission_candidates(
+        self
+    ) -> list[tuple[RequestState, int, int, tuple[BlockRef, ...]]]:
+        manager = self._block_manager
+        remaining_blocks = manager.free_block_count
 
         for request_id in self._slot_request_ids:
             if request_id is not None:
@@ -791,9 +812,10 @@ class Scheduler:
                 remaining_blocks -= self._request_block_demand(
                     len(request.prompt_token_ids),
                     request.sampling,
-                )
+                ) - len(manager.block_table(request_id))
 
-        candidates: list[tuple[RequestState, int]] = []
+        candidates = []
+        pinned: set[BlockRef] = set()
         free_slots = iter(self._free_slots())
         request_slot = next(free_slots, None)
 
@@ -802,16 +824,41 @@ class Scheduler:
                 break
 
             request = self._requests[request_id]
+            prefix = manager.match_prefix(
+                request_id,
+                request.prompt_token_ids,
+            )
+            
             demand = self._request_block_demand(
                 len(request.prompt_token_ids),
                 request.sampling,
             )
 
-            if demand > remaining_blocks:
+            new_pins = {
+                ref 
+                for ref in prefix
+                if (
+                    manager.pool.state(ref) is BlockState.CACHED
+                    and ref not in pinned
+                )
+            }
+
+            cost = demand - len(prefix) + len(new_pins)
+
+            if cost > remaining_blocks:
                 continue
 
-            candidates.append((request, request_slot))
-            remaining_blocks -= demand
+            candidates.append(
+                (
+                    request,
+                    request_slot,
+                    len(prefix) * self.kv_block_size,
+                    prefix,
+                )
+            )
+
+            remaining_blocks -= cost
+            pinned.update(new_pins)
             request_slot = next(free_slots, None)
 
         return candidates
@@ -823,8 +870,11 @@ class Scheduler:
         request_slot: int,
         work_class: WorkClass,
         query_len: int,
+        token_start: int | None = None,
     ) -> WorkItem:
-        token_start = request.computed_tokens
+        if token_start is None:
+            token_start = request.computed_tokens
+
         token_end = token_start + query_len
 
         return WorkItem(
@@ -862,7 +912,7 @@ class Scheduler:
         used_tokens = 0
 
         for offset in range(count):
-            request, request_slot = candidates[start + offset]
+            request, request_slot, token_start, _ = candidates[start + offset]
 
             tokens_for_later = (
                 count - offset - 1
@@ -871,7 +921,7 @@ class Scheduler:
             )
 
             query_len = min(
-                request.num_uncomputed_tokens,
+                request.total_tokens - token_start,
                 self.prefill_chunk_size,
                 token_budget
                 - used_tokens
@@ -887,6 +937,7 @@ class Scheduler:
                     request_slot,
                     WorkClass.PREFILL,
                     query_len,
+                    token_start,
                 )
             )
             used_tokens += query_len

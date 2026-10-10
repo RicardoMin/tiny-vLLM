@@ -140,6 +140,7 @@ def create_engine(config: EngineConfig) -> Engine:
         kv_block_size=config.kv_block_size,
         kv_num_blocks=num_blocks,
         eos_token_ids=model_config.eos_token_id,
+        enable_prefix_caching=config.enable_prefix_caching,
     )
 
     executor = Executor(

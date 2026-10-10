@@ -501,6 +501,18 @@ class Engine:
             completion_events=completions,
         )
 
+        
+    def reset_prefix_cache(self) -> None:
+        """Drop reusable prefixes between workloads, without reallocating KV."""
+        self._ensure_healthy()
+        
+        if self._generating or self.has_unfinished():
+            raise RuntimeError(
+                "reset_prefix_cache requires an idle engine"
+            )
+
+        self.scheduler.block_manager.reset_prefix_cache()
+
 
     def close(self) -> None:
         """Permanently dispose resources; pending requests are discarded."""

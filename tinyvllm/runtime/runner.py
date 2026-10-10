@@ -130,11 +130,11 @@ class ModelRunner:
         block_ids = batch.kv_block_table_ids
         if any(type(i) is not int or not 0 <= i < cache.num_blocks for i in block_ids):
             raise ValueError("block ID is out of range")
-        # No shared blocks or COW in P1, including sharing between requests.
-        if len(set(block_ids)) != len(block_ids):
-            raise ValueError("block tables must own distinct physical blocks")
         if any(type(i) is not int or not 0 <= i < self.model.config.vocab_size for i in batch.input_ids):
             raise ValueError("input token ID is out of vocabulary range")
+
+        seen_blocks: set[int] = set()
+        written_blocks: set[int] = set()
 
         for index in range(count):
             start, end = batch.q_offsets[index:index + 2]
@@ -155,6 +155,24 @@ class ModelRunner:
             if first < 0 or last - first != required:
                 raise ValueError("block table length does not match context")
             table = block_ids[first:last]
+
+            row_blocks = set(table)
+            
+            if len(row_blocks) != len(table):
+                raise ValueError(
+                    "one request cannot alias its logical blocks"
+                )
+                
+            writes = set(table[before // cache.block_size:])
+
+            if writes & seen_blocks or row_blocks & written_blocks:
+                raise ValueError(
+                    "shared blocks must be complete read-only prefixes"
+                )
+
+            seen_blocks.update(row_blocks)
+            written_blocks.update(writes)
+            
             expected = tuple(
                 table[p // cache.block_size] * cache.block_size + p % cache.block_size
                 for p in range(before, after)
