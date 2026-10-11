@@ -74,7 +74,6 @@ class ModelInput:
         }
         read_slots = []
         query_rows, block_ids, table_offsets, context_lens = [], [], [0], []
-        gather_tables = None
 
         if not paged_decode or ( 
             not paged_prefill
@@ -86,7 +85,7 @@ class ModelInput:
                 )
             )
         ):
-            reference_tables = torch.tensor(
+            gather_tables = torch.tensor(
                 batch.kv_block_table_ids,
                 **kwargs,
             )
@@ -107,10 +106,9 @@ class ModelInput:
                 # Fresh queries use current K/V; paged prefill reads blocks.
                 read_slots.append(None)
             else:
-                # Gather histor:28
-                # ical K/V in logical order for SDPA.
+                # Gather historical K/V in logical order for SDPA.
                 positions = torch.arange(length, **kwargs)
-                physical = reference_tables[first:last].index_select(
+                physical = gather_tables[first:last].index_select(
                     0, positions // batch.kv_block_size,
                 )
                 read_slots.append(

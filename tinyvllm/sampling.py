@@ -94,6 +94,13 @@ class TorchSampler:
             )
 
         row_max = scores.amax(dim=-1, keepdim=True)
+
+        # A finite maximum allows masked -inf entries, but rejects an
+        # invalid distribution without scanning the vocabulary again.
+        torch._assert_async(
+            torch.isfinite(row_max).all(),
+            "sampling logits must have a finite maximum in every row",
+        )
         scores = (scores - row_max).div_(temperture)
         candidate_ids: torch.Tensor | None = None
         
@@ -112,13 +119,6 @@ class TorchSampler:
                     device=logits.device,
                 )
             return candidate_ids[:, 0]
-        
-        # A finite maximum allows masked -inf entries, but rejects an
-        # invalid distribution without scanning the vocabulary again.
-        torch._assert_async(
-            torch.isfinite(row_max).all(),
-            "sampling logits must have a finite maximum in every row",
-        )
 
         order: torch.Tensor | None = None
 

@@ -594,7 +594,6 @@ class Scheduler:
         )
 
         try:
-            plan_id = txn.plan.plan_id
             for item in txn.plan.items:
                 request = self._requests[item.request_id]
 
@@ -614,7 +613,6 @@ class Scheduler:
                 else:
                     self._prefill_ids.remove(request.request_id)
 
-                request.inflight_plan_id = plan_id
 
             self._now_ns = now_ns
             self._command_cutoff_ready = False
@@ -669,7 +667,6 @@ class Scheduler:
             for item in plan.items:
                 request = self._requests[item.request_id]
                 request.computed_tokens = item.token_end
-                request.inflight_plan_id = None
 
                 self._block_manager.cache_full_blocks(
                     request.request_id,
@@ -738,7 +735,6 @@ class Scheduler:
             object.__setattr__(txn, "state", TxnState.FAILED)
 
         for request in self._requests.values():
-            request.inflight_plan_id = None
             request.active_slot = None
 
         self._requests.clear()
@@ -983,7 +979,6 @@ class Scheduler:
         now_ns: int,
     ) -> None:
         request.status = status
-        request.inflight_plan_id = None
         request.finished_ns = now_ns
 
         if request.active_slot is not None:

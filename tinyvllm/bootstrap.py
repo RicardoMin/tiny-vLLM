@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import time
+import logging
 import torch
 
 from tinyvllm.config import EngineConfig
@@ -9,6 +11,9 @@ from tinyvllm.runtime.inputs import DecodeInputs
 
 if TYPE_CHECKING:
     from tinyvllm.engine import Engine
+
+    
+logger = logging.getLogger(__name__)
 
 
 def _plan_kv_blocks(
@@ -58,6 +63,8 @@ def create_engine(config: EngineConfig) -> Engine:
     does not estimate activation peaks; validate workload limits separately.
     """
 
+    started = time.perf_counter()
+
     from tinyvllm.engine import Engine
     from tinyvllm.executor import Executor
     from tinyvllm.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
@@ -80,6 +87,14 @@ def create_engine(config: EngineConfig) -> Engine:
         torch.cuda.current_device(),
     )
     dtype = getattr(torch, config.dtype)
+
+    logger.info(
+        "Loading model=%s device=%s dtype=%s attention_backend=%s",
+        config.model,
+        device,
+        config.dtype,
+        config.attention_backend,
+    )
 
     model = Qwen3ForCausalLM.from_pretrained(
         config.model,
@@ -165,11 +180,25 @@ def create_engine(config: EngineConfig) -> Engine:
         ):
             raise ValueError(
                 "initialized engine exceeds GPU usage ceiling; "
-                "lower kv_cache_memory_bytes, set enfore_eager=True, "
+                "lower kv_cache_memory_bytes, set enforce_eager=True, "
                 "or free device memory"
             )
 
-        return Engine(scheduler, executor)
+        engine = Engine(scheduler, executor)
+        graphs = executor.runner.decode_graphs
+        
+        logger.info(
+            "Engine ready: kv_blocks=%d block_size=%d kv_bytes=%d "
+            "decode_graph_batches=%s prefix_cache=%s init_seconds=%.2f",
+            num_blocks,
+            config.kv_block_size,
+            num_blocks * bytes_per_block,
+            tuple(graphs.entries) if graphs is not None else (),
+            config.enable_prefix_caching,
+            time.perf_counter() - started,
+        )
+
+        return engine
 
     except Exception as cause:
         try:

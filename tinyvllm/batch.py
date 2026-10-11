@@ -137,10 +137,6 @@ class PreparedBatch:
         return len(self.sample_token_indices)
 
     @property
-    def num_decode_tokens(self) -> int:
-        return self.q_offsets[self.num_decode_items]
-
-    @property
     def has_kv_metadata(self) -> bool:
         return bool(self.kv_block_table_offsets)
 

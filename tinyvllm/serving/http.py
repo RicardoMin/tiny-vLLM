@@ -119,6 +119,12 @@ class _Server:
         
     async def lifespan(self, app):
         async with self.llm:
+            logger.info(
+                "Text service ready: model=%s max_requests=%d request_timeout=%.1fs",
+                self.model,
+                self.limit,
+                self.timeout,
+            )
             yield
             
     async def shutdown(self, app):
@@ -145,26 +151,87 @@ class _Server:
 
     
     async def generate(self, request):
-        if self.closing or not self.llm.is_running:
-            return web.json_response(
-                _error("engine unavailable", "unavailable"),
-                status=503,
-            )
+        request_id = (
+            "chatcmpl-"
+            if request.path == "/v1/chat/completions"
+            else "cmpl-"
+        ) + uuid.uuid4().hex
 
-        if self.active >= self.limit:
-            return web.json_response(
-                _error("request capacity exhausted", "overloaded"),
-                status=429,
-            )    
+        started = time.perf_counter()
+        
+        summary = {
+            "outcome": "internal_error",
+            "http_status": None,
+            "engine_request_id": None,
+            "finish_reason": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "first_text_ms": None,
+        }
 
-        self.active += 1
+        admitted = False
+        
         try:
-            return await self._generate(request)
+            if self.closing or not self.llm.is_running:
+                summary.update(
+                    outcome="unavailable",
+                    http_status=503,
+                )
+
+                response = web.json_response(
+                    _error("engine unavailable", "unavailable"),
+                    status=503,
+                    headers={"X-Request-ID": request_id},
+                )
+
+            elif self.active >= self.limit:
+                summary.update(
+                    outcome="overloaded",
+                    http_status=429,
+                )
+
+                response = web.json_response(
+                    _error("request capacity exhausted", "overloaded"),
+                    status=429,
+                    headers={"X-Request-ID": request_id},
+                )
+
+            else:
+                self.active += 1
+                admitted = True
+                
+                response = await self._generate(
+                    request,
+                    request_id,
+                    summary,
+                    started,
+                )
+
+            return response
+
+        except asyncio.CancelledError:
+            summary["outcome"] = "cancelled"
+            raise
+        
         finally:
-            self.active -= 1
+            if admitted:
+                self.active -= 1
+                
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "request_id=%s %s",
+                    request_id,
+                    json.dumps({
+                        **summary,
+                        "elapsed_ms": round(
+                            (time.perf_counter() - started) * 1000,
+                            3,
+                        ),
+                    }),
+                )
             
             
-    async def _generate(self, request):
+    async def _generate(self, request, request_id, summary, started):
         streaming = False
         submitted = False
         terminal_started = False
@@ -173,6 +240,7 @@ class _Server:
             "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         })
 
         try:
@@ -196,9 +264,7 @@ class _Server:
                 )
 
                 common = {
-                    "id": (
-                        "chatcmpl-" if chat else "cmpl-"
-                    ) + uuid.uuid4().hex,
+                    "id": request_id,
                     "object": "chat.completion" if chat else "text_completion",
                     "created": int(time.time()),
                     "model": self.model,
@@ -211,17 +277,34 @@ class _Server:
                     submitted = True
                     if streaming:
                         await response.prepare(request)
+                        summary["http_status"] = response.status
                         if chat:
                             await _send(response, self._chunk(common, chat, role=True))
 
                     async for event in stream:
                         if isinstance(event, TextDelta):
+                            if summary["first_text_ms"] is None:
+                                # HTTP application observation,
+                                # not GPU TTFT or wire receipt.
+                                summary["first_text_ms"] = round(
+                                    (time.perf_counter() - started) * 1000,
+                                    3,
+                                )
+                                summary["engine_request_id"] = event.request_id
+                            
                             if streaming:
                                 await _send(
                                     response,
                                     self._chunk(common, chat, text=event.text),
                                 )
                             continue
+
+                        summary.update(
+                            engine_request_id=event.request_id,
+                            finish_reason=event.finish_reason,
+                            prompt_tokens=event.prompt_token_count,
+                            completion_tokens=event.completion_token_count,
+                        )
                         
                         usage = {
                             "prompt_tokens": event.prompt_token_count,
@@ -240,6 +323,9 @@ class _Server:
                                 })
                             await _send(response, "[DONE]")
                             await response.write_eof()
+
+                            summary["outcome"] = "completed"
+                            
                             return response
                         
                         choice = {"index": 0, "finish_reason": event.finish_reason}
@@ -250,13 +336,20 @@ class _Server:
                             }
                         else:
                             choice["text"] = event.text 
-                        response = web.json_response({
-                            **common,
-                            "choices": [choice],
-                            "usage": usage,
-                        })
+                        response = web.json_response(
+                            {
+                                **common,
+                                "choices": [choice],
+                                "usage": usage,
+                            },
+                            headers={"X-Request-ID": request_id},
+                        )
                         await response.prepare(request)
+                        summary["http_status"] = response.status
+                        
                         await response.write_eof()
+                        summary["outcome"] = "completed"
+                        
                         return response
             
         except web.HTTPRequestEntityTooLarge:
@@ -278,10 +371,14 @@ class _Server:
                 "slow_consumer",
             )
         except ConnectionError:
+            summary["outcome"] = "disconnected"
             _abort_response(request, response)
             return response
         except RuntimeError:
-            logger.exception("generation failed")
+            logger.exception(
+                "request_id=%s generation failed",
+                request_id,
+            )
             status, failure = 503, _error(
                 "generation unavailable",
                 "unavailable",
@@ -291,8 +388,13 @@ class _Server:
             if not submitted and isinstance(error, (TypeError, ValueError)):
                 status, failure = 400, _error(str(error), "invalid_request")
             else:
-                logger.exception("unexpected generation error")
+                logger.exception(
+                    "request_id=%s unexpected generation error",
+                    request_id,
+                )
                 status, failure = 500, _error("internal generation error", "server_error")
+
+        summary["outcome"] = failure["error"]["type"]
                 
         if terminal_started:
             _abort_response(request, response)
@@ -302,8 +404,15 @@ class _Server:
         try:
             async with asyncio.timeout(1.0):
                 if not response.prepared:
-                    response = web.json_response(failure, status=status)
+                    response = web.json_response(
+                        failure, 
+                        status=status,
+                        headers={"X-Request-ID": request_id},
+                    )
+
                     await response.prepare(request)
+                    summary["http_status"] = response.status
+                    
                     await response.write_eof()
                 elif streaming:
                     await _send(response, failure)
@@ -419,6 +528,11 @@ def main(argv=None) -> None:
     parser.add_argument("--request-timeout", type=float, default=120.0)
 
     args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     config = EngineConfig(
         model=args.model,

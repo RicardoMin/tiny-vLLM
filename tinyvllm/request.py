@@ -83,7 +83,6 @@ class RequestState:
     work_class: WorkClass = WorkClass.PREFILL
     computed_tokens: int = 0
     active_slot: int | None = None
-    inflight_plan_id: int | None = None
 
     admitted_ns: int | None = None
     first_token_ns: int | None = None
@@ -109,21 +108,12 @@ class RequestState:
 
 
     @property
-    def context_token_ids(self) -> list[int]:
-        # Debug/test convenience only.
-        # BatchBuilder will use token_slice() on the hot path.
-        return self.prompt_token_ids + self.output_token_ids
-
-
-    @property
     def total_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
-
 
     @property
     def num_output_tokens(self) -> int:
         return len(self.output_token_ids)
-
 
     @property
     def terminal(self) -> bool:
@@ -145,11 +135,6 @@ class RequestState:
             self.prompt_token_ids[start:]
             + self.output_token_ids[: end - prompt_len]
         )
-
-
-    @property
-    def num_uncomputed_tokens(self) -> int:
-        return self.total_tokens - self.computed_tokens
 
 
     @property
