@@ -18,3 +18,13 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """Fuse the activation and gate/up product, preserving intermediate rounding."""
     load_cuda_kernels()
     return torch.ops.tinyvllm_cuda.silu_and_mul(x)
+
+
+def apply_rope(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Apply half-split RoPE with the original intermediate rounding."""
+    load_cuda_kernels()
+    return torch.ops.tinyvllm_cuda.apply_rope(x, cos, sin)

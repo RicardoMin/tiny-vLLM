@@ -146,6 +146,64 @@ __global__ void silu_and_mul_kernel(
 }
 
 
+template <typename scalar_t>
+__global__ void apply_rope_kernel(
+    const scalar_t* input,
+    const scalar_t* cos,
+    const scalar_t* sin,
+    scalar_t* output,
+    Rows rows
+) {
+    const int64_t half = rows.width / 2;
+    const int64_t pairs = rows.count * half;
+
+    for (
+        int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+        index < pairs;
+        index += int64_t(blockDim.x) * gridDim.x
+    ) {
+        const int64_t row = index / half;
+        const int64_t column = index % half;
+        const int64_t token = row / rows.heads;
+
+        const int64_t source = token * rows.token_stride
+            + row % rows.heads * rows.head_stride + column;
+
+        const int64_t target = row * rows.width + column;
+        const int64_t angle = token * half + column;
+
+        const float first = static_cast<float>(input[source]);
+        const float second = static_cast<float>(input[source + half]);
+        const float c = static_cast<float>(cos[angle]);
+        const float s = static_cast<float>(sin[angle]);
+
+        // Preserve the four materialized products of the PyTorch expression.
+        const scalar_t first_cos = static_cast<scalar_t>(
+            __fmul_rn(first, c)
+        );
+        const scalar_t second_sin = static_cast<scalar_t>(
+            __fmul_rn(second, s)
+        );
+        const scalar_t second_cos = static_cast<scalar_t>(
+            __fmul_rn(second, c)
+        );
+        const scalar_t first_sin = static_cast<scalar_t>(
+            __fmul_rn(first, s)
+        );
+
+        output[target] = static_cast<scalar_t>(__fsub_rn(
+            static_cast<float>(first_cos),
+            static_cast<float>(second_sin)
+        ));
+        
+        output[target + half] = static_cast<scalar_t>(__fadd_rn(
+            static_cast<float>(second_cos),
+            static_cast<float>(first_sin)
+        ));
+    }
+}
+
+
 at::Tensor rms_norm(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -221,16 +279,83 @@ at::Tensor silu_and_mul(const at::Tensor& input) {
     return output;
 }
 
+
+at::Tensor apply_rope(
+    const at::Tensor& input,
+    const at::Tensor& cos,
+    const at::Tensor& sin
+) {
+    const Rows rows = check_rows(input);
+
+    TORCH_CHECK(
+        input.dim() == 3 && rows.width % 2 == 0,
+        "RoPE input must be [tokens, heads, even head_dim]"
+    );
+
+    for (const auto* table : {&cos, &sin}) {
+        TORCH_CHECK(
+            table->device() == input.device()
+                && table->scalar_type() == input.scalar_type()
+                && table->dim() == 3
+                && table->size(0) == input.size(0)
+                && table->size(1) == 1
+                && table->size(2) == rows.width / 2
+                && table->is_contiguous(),
+            "RoPE cos/sin must be contiguous [tokens, 1, head_dim/2] "
+            "with input device and dtype"
+        );
+    }
+
+    const c10::cuda::CUDAGuard guard(input.device());
+    auto output = at::empty(input.sizes(), input.options());
+
+    const int64_t pairs = input.numel() / 2;
+    if (pairs == 0) {
+        return output;
+    }
+
+    const auto stream = c10::cuda::getCurrentCUDAStream(
+        input.get_device()
+    );
+    const int blocks = std::min<int64_t>(
+        (pairs + 127) / 128,
+        65535
+    );
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::kHalf,
+        at::kBFloat16,
+        input.scalar_type(),
+        "apply_rope",
+        [&] {
+            apply_rope_kernel<scalar_t><<<
+                blocks, 128, 0, stream.stream()
+            >>>(
+                input.data_ptr<scalar_t>(),
+                cos.data_ptr<scalar_t>(),
+                sin.data_ptr<scalar_t>(),
+                output.data_ptr<scalar_t>(),
+                rows
+            );
+        }
+    );
+
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}
+
 }   // namespace
 
 
 TORCH_LIBRARY_FRAGMENT(tinyvllm_cuda, m) {
     m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
     m.def("silu_and_mul(Tensor input) -> Tensor");
+    m.def("apply_rope(Tensor input, Tensor cos, Tensor sin) -> Tensor");
 }
 
 
 TORCH_LIBRARY_IMPL(tinyvllm_cuda, CUDA, m) {
     m.impl("rms_norm", &rms_norm);
     m.impl("silu_and_mul", &silu_and_mul);
+    m.impl("apply_rope", &apply_rope);
 }

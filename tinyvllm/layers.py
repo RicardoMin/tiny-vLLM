@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from tinyvllm._validation import _check_positive_int
-from tinyvllm.kernels.pointwise import rms_norm, silu_and_mul
+from tinyvllm.kernels.pointwise import rms_norm, silu_and_mul, apply_rope
 
 
 class PackedLinear(nn.Module):
@@ -239,14 +239,7 @@ class RotaryEmbedding(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        first, second = x.chunk(2, dim=-1)
-        return torch.cat(
-            (
-                first * cos - second * sin,
-                second * cos + first * sin,
-            ),
-            dim=-1,
-        )
+        return apply_rope(x, cos, sin)
 
 
 class SiluAndMul(nn.Module):
