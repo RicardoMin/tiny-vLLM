@@ -9,7 +9,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from tinyvllm._validation import _check_positive_int
-from tinyvllm.kernels.pointwise import rms_norm, silu_and_mul, apply_rope
+from tinyvllm.kernels.pointwise import (
+    add_rms_norm,
+    rms_norm, 
+    silu_and_mul, 
+    apply_rope,
+)
 
 
 class PackedLinear(nn.Module):
@@ -150,6 +155,14 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return rms_norm(x, self.weight, self.eps)
+
+        
+    def add(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return add_rms_norm(x, residual, self.weight, self.eps)
 
 
 class RotaryEmbedding(nn.Module):

@@ -392,31 +392,28 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         *,
+        residual: torch.Tensor | None,
         layer_idx: int,
         attention: AttentionBackend,
-    ) -> torch.Tensor:
-        residual = hidden_states
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm.add(
+                hidden_states, residual
+            )
 
-        hidden_states = self.input_layernorm(
-            hidden_states
-        )
-        hidden_states = residual + self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states,
             position_embeddings,
             layer_idx=layer_idx,
             attention=attention,
         )
-
-        residual = hidden_states
-
-        hidden_states = self.post_attention_layernorm(
-            hidden_states
+        hidden_states, residual = self.post_attention_layernorm.add(
+            hidden_states, residual,
         )
-        hidden_states = residual + self.mlp(
-            hidden_states
-        )
-
-        return hidden_states
+        return self.mlp(hidden_states), residual
 
 
 class Qwen3Model(nn.Module):
@@ -487,15 +484,18 @@ class Qwen3Model(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
         position_embeddings = self.rotary_emb(positions, hidden_states.dtype)
 
+        residual = None
         for layer_idx, layer in enumerate(self.layers):
-            hidden_states = layer(
+            hidden_states, residual = layer(
                 hidden_states,
                 position_embeddings,
+                residual=residual,
                 layer_idx=layer_idx,
                 attention=attention,
             )
 
-        return self.norm(hidden_states)
+        hidden_states, _ = self.norm.add(hidden_states, residual)
+        return hidden_states
 
 
 class Qwen3ForCausalLM(nn.Module):

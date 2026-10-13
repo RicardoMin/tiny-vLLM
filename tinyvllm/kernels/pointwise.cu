@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <tuple>
 
 
 namespace {
@@ -59,35 +60,54 @@ __device__ __forceinline__ float warp_all_sum(float value) {
 }
 
 
-template <typename scalar_t, int ThreadsPerRow>
+template <typename scalar_t, int Width, int Threads, bool AddResidual>
 __global__ void rms_norm_kernel(
     const scalar_t* input,
     const scalar_t* weight,
+    const scalar_t* residual,
     scalar_t* output,
+    scalar_t* residual_output,
     Rows rows,
+    int64_t residual_stride,
     float eps
 ) {
-    constexpr int RowsPerBlock = 128 / ThreadsPerRow;
-    const int64_t row = blockIdx.x * int64_t(RowsPerBlock)
-        + threadIdx.x / ThreadsPerRow;
-
+    const int rows_per_block = blockDim.x / Threads;
+    const int64_t row = int64_t(blockIdx.x) * rows_per_block
+        + threadIdx.x / Threads; 
     if (row >= rows.count) {
         return;
     }
 
-    const int column = threadIdx.x % ThreadsPerRow;
+    const int column = threadIdx.x % Threads;
+    const int width = Width == 0 ? int(rows.width) : Width;
     const int lane = threadIdx.x % 32;
     const int64_t source = row / rows.heads * rows.token_stride
         + row % rows.heads * rows.head_stride;
+    const int64_t target = int64_t(row) * width;
+    float values[Width == 0 ? 1 : Width / Threads];
 
     float sum = 0.0f;
-    for (int64_t d = column; d < rows.width; d += ThreadsPerRow) {
-        const float value = static_cast<float>(input[source + d]);
-        sum = __fadd_rn(sum, __fmul_rn(value, value));
+    #pragma unroll
+    for (int i = 0; i < (width + Threads - 1) / Threads; ++i) {
+        const int d = i * Threads + column;
+        if (d < width) {
+            scalar_t value = input[source + d];
+            if constexpr (AddResidual) {
+                value = static_cast<scalar_t>(__fadd_rn(
+                    static_cast<float>(value),
+                    static_cast<float>(residual[int64_t(row) * residual_stride + d])
+                ));
+            }
+            const float x = static_cast<float>(value);
+            if constexpr (Width != 0) {
+                values[i] = x;
+            }
+            sum = __fadd_rn(sum, __fmul_rn(x, x));
+        }
     }
     sum = warp_all_sum(sum);
 
-    if constexpr (ThreadsPerRow == 128) {
+    if constexpr (Threads == 128) {
         __shared__ float partial[4];
         if (lane == 0) {
             partial[threadIdx.x / 32] = sum;
@@ -97,16 +117,77 @@ __global__ void rms_norm_kernel(
         sum = warp_all_sum(sum);
     }
 
-    const float variance = __fmul_rn(sum, 1.0f / float(rows.width));
+    const float variance = __fmul_rn(sum, 1.0f / float(width));
     const float inverse_rms = rsqrtf(__fadd_rn(variance, eps));
 
-    for (int64_t d = column; d < rows.width; d += ThreadsPerRow) {
-        const float value = static_cast<float>(input[source + d]);
-        // Qwen rounds the normalized value before multiplying by the weight.
-        const scalar_t normalized = static_cast<scalar_t>(value * inverse_rms);
-        output[row * rows.width + d] = static_cast<scalar_t>(
-            static_cast<float>(normalized) * static_cast<float>(weight[d])
-        );
+    #pragma unroll
+    for (int i = 0; i < (width + Threads - 1) / Threads; ++i) {
+        const int d = i * Threads + column;
+        if (d < width) {
+            float value;
+            if constexpr (Width != 0) {
+                value = values[i];
+            } else if constexpr (AddResidual) {
+                const scalar_t merged = static_cast<scalar_t>(__fadd_rn(
+                    static_cast<float>(input[source + d]),
+                    static_cast<float>(residual[row * residual_stride + d])
+                ));
+                value = static_cast<float>(merged);
+            } else {
+                value = static_cast<float>(input[source + d]);
+            }
+            if constexpr (AddResidual) {
+                residual_output[target + d] = static_cast<scalar_t>(value);
+            }
+            const scalar_t normalized = static_cast<scalar_t>(
+                __fmul_rn(value, inverse_rms
+            ));
+            output[target + d] = static_cast<scalar_t>(__fmul_rn(
+                static_cast<float>(normalized), static_cast<float>(weight[d])
+            ));
+        }
+    }
+}
+
+
+template <typename scalar_t, bool AddResidual>
+void launch_rms_norm(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const at::Tensor& residual,
+    at::Tensor& output,
+    at::Tensor& residual_output,
+    Rows rows,
+    float eps
+) {
+    const auto stream = c10::cuda::getCurrentCUDAStream(input.get_device());
+    const auto* x = input.data_ptr<scalar_t>();
+    const auto* w = weight.data_ptr<scalar_t>();
+    const auto* r = AddResidual ? residual.data_ptr<scalar_t>() : nullptr;
+    auto* y = output.data_ptr<scalar_t>();
+    auto* merged = AddResidual ? residual_output.data_ptr<scalar_t>() : nullptr;
+    const int64_t stride = AddResidual ? residual.stride(0) : 0;
+
+    const int small_threads = rows.count < 1024 ? 32 : 128;
+    const int rows_per_block = small_threads / 32;
+    const int small_blocks = (rows.count + rows_per_block - 1) / rows_per_block;
+
+    if (rows.width == 128) {
+        rms_norm_kernel<scalar_t, 128, 32, AddResidual><<<
+            small_blocks, small_threads, 0, stream.stream()
+        >>>(x, w, r, y, merged, rows, stride, eps);
+    } else if (rows.width == 1024) {
+        rms_norm_kernel<scalar_t, 1024, 128, AddResidual><<<
+            rows.count, 128, 0, stream.stream()
+        >>>(x, w, r, y, merged, rows, stride, eps);
+    } else if (rows.width <= 256) {
+        rms_norm_kernel<scalar_t, 0, 32, AddResidual><<<
+            small_blocks, small_threads, 0, stream.stream()
+        >>>(x, w, r, y, merged, rows, stride, eps);
+    } else {
+        rms_norm_kernel<scalar_t, 0, 128, AddResidual><<<
+            rows.count, 128, 0, stream.stream()
+        >>>(x, w, r, y, merged, rows, stride, eps);
     }
 }
 
@@ -204,10 +285,11 @@ __global__ void apply_rope_kernel(
 }
 
 
-at::Tensor rms_norm(
+std::tuple<at::Tensor, at::Tensor> rms_norm_impl(
     const at::Tensor& input,
     const at::Tensor& weight,
-    double eps
+    double eps,
+    const at::Tensor& residual
 ) {
     const Rows rows = check_rows(input);
     TORCH_CHECK(
@@ -218,37 +300,67 @@ at::Tensor rms_norm(
             && weight.is_contiguous(),
         "RMSNorm weight must be contiguous [width] with input device and dtype"
     );
-    TORCH_CHECK(rows.count <= INT_MAX, "too many RMSNorm rows");
+    TORCH_CHECK(
+        rows.count <= INT_MAX && rows.width <= INT_MAX - 127,
+        "RMSNorm dimensions exceed CUDA index range"
+    );
+    const bool add_residual = residual.defined();
+    if (add_residual) {
+        TORCH_CHECK(
+            input.dim() == 2
+                && residual.device() == input.device()
+                && residual.scalar_type() == input.scalar_type()
+                && residual.layout() == at::kStrided
+                && residual.sizes() == input.sizes()
+                && residual.stride(-1) == 1,
+            "residual must match the 2D input shape, device and dtype, with last stride 1"
+        );
+    }
 
     const c10::cuda::CUDAGuard guard(input.device());
     auto output = at::empty(input.sizes(), input.options());
+    auto merged = add_residual
+        ? at::empty(input.sizes(), input.options()) : at::Tensor();
     if (rows.count == 0) {
-        return output;
+        return {output, merged};
     }
-    const auto stream = c10::cuda::getCurrentCUDAStream(input.get_device());
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::kHalf, at::kBFloat16, input.scalar_type(), "rms_norm", [&] {
-            if (rows.width <= 256) {
-                rms_norm_kernel<scalar_t, 32><<<
-                    (rows.count + 3) / 4, 128, 0, stream.stream()
-                >>>(
-                    input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
-                    output.data_ptr<scalar_t>(), rows, static_cast<float>(eps)
+            if (add_residual) {
+                launch_rms_norm<scalar_t, true>(
+                    input, weight, residual, output, merged, rows, float(eps)
                 );
             } else {
-                rms_norm_kernel<scalar_t, 128><<<
-                    rows.count, 128, 0, stream.stream()
-                >>>(
-                    input.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
-                    output.data_ptr<scalar_t>(), rows, static_cast<float>(eps)
+                launch_rms_norm<scalar_t, false>(
+                    input, weight, residual, output, merged, rows, float(eps)
                 );
             }
         }
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return output;
+    return {output, merged};
 }
+
+
+at::Tensor rms_norm(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    double eps
+) {
+    return std::get<0>(rms_norm_impl(input, weight, eps, at::Tensor()));
+}
+
+
+std::tuple<at::Tensor, at::Tensor> add_rms_norm(
+    const at::Tensor& input,
+    const at::Tensor& residual,
+    const at::Tensor& weight,
+    double eps
+) {
+    return rms_norm_impl(input, weight, eps, residual);
+}
+
 
 at::Tensor silu_and_mul(const at::Tensor& input) {
     const Rows rows = check_rows(input);
@@ -349,6 +461,7 @@ at::Tensor apply_rope(
 
 TORCH_LIBRARY_FRAGMENT(tinyvllm_cuda, m) {
     m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
+    m.def("add_rms_norm(Tensor input, Tensor residual, Tensor weight, float eps) -> (Tensor, Tensor)");
     m.def("silu_and_mul(Tensor input) -> Tensor");
     m.def("apply_rope(Tensor input, Tensor cos, Tensor sin) -> Tensor");
 }
@@ -356,6 +469,7 @@ TORCH_LIBRARY_FRAGMENT(tinyvllm_cuda, m) {
 
 TORCH_LIBRARY_IMPL(tinyvllm_cuda, CUDA, m) {
     m.impl("rms_norm", &rms_norm);
+    m.impl("add_rms_norm", &add_rms_norm);
     m.impl("silu_and_mul", &silu_and_mul);
     m.impl("apply_rope", &apply_rope);
 }

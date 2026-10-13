@@ -14,6 +14,17 @@ def rms_norm(
     return torch.ops.tinyvllm_cuda.rms_norm(x, weight, eps)
 
     
+def add_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return normalized and rounded residual sums without modifying inputs."""
+    load_cuda_kernels()
+    return torch.ops.tinyvllm_cuda.add_rms_norm(x, residual, weight, eps)
+
+    
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """Fuse the activation and gate/up product, preserving intermediate rounding."""
     load_cuda_kernels()
