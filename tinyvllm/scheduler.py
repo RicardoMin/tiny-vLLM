@@ -798,8 +798,13 @@ class Scheduler:
     def _admission_candidates(
         self
     ) -> list[tuple[RequestState, int, int, tuple[BlockRef, ...]]]:
+        if not self._waiting_ids:
+            return []
+        
         manager = self._block_manager
+        prefix_cache = manager.prefix_cache
         remaining_blocks = manager.free_block_count
+        pending_keys: set[bytes] = set()
 
         for request_id in self._slot_request_ids:
             if request_id is not None:
@@ -809,6 +814,16 @@ class Scheduler:
                     len(request.prompt_token_ids),
                     request.sampling,
                 ) - len(manager.block_table(request_id))
+
+                if request.work_class is WorkClass.PREFILL:
+                    key = prefix_cache.next_prefill_key(
+                        request_id,
+                        request.computed_tokens,
+                        len(request.prompt_token_ids),
+                        self.prefill_chunk_size,
+                    )
+                    if key is not None:
+                        pending_keys.add(key)
 
         candidates = []
         pinned: set[BlockRef] = set()
@@ -824,6 +839,15 @@ class Scheduler:
                 request_id,
                 request.prompt_token_ids,
             )
+            token_start = len(prefix) * self.kv_block_size
+            key = prefix_cache.next_prefill_key(
+                request_id,
+                token_start,
+                len(request.prompt_token_ids),
+                self.prefill_chunk_size,
+            )
+            if key is not None and key in pending_keys:
+                continue
             
             demand = self._request_block_demand(
                 len(request.prompt_token_ids),
@@ -848,13 +872,15 @@ class Scheduler:
                 (
                     request,
                     request_slot,
-                    len(prefix) * self.kv_block_size,
+                    token_start,
                     prefix,
                 )
             )
 
             remaining_blocks -= cost
             pinned.update(new_pins)
+            if key is not None:
+                pending_keys.add(key)
             request_slot = next(free_slots, None)
 
         return candidates

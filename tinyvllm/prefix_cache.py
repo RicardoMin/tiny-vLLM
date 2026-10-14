@@ -75,6 +75,22 @@ class PrefixCache:
             refs.append(ref)
             
         return tuple(refs)
+
+        
+    def next_prefill_key(
+        self,
+        request_id: int,
+        token_start: int,
+        prompt_len: int,
+        chunk_size: int,
+    ) -> bytes | None:
+        """After match(), identify a reusable chunk from the current block boundary."""
+        span_blocks = (chunk_size + self.block_size - 1) // self.block_size
+        block_index = token_start // self.block_size + span_blocks - 1
+        if not self.enabled or block_index >= (prompt_len - 1) // self.block_size:
+            return None
+        
+        return self._request_keys[request_id][block_index]
     
     
     def validate_match(
