@@ -76,7 +76,10 @@ class SDPAAttention:
     ) -> torch.Tensor:
         self._write_kv(layer_idx, k, v)
 
-        output = torch.empty_like(q)
+        output = torch.empty_like(
+            q,
+            memory_format=torch.contiguous_format,
+        )
         self._attend(layer_idx, q, k, v, output, scale=scale)
 
         return output
@@ -151,6 +154,25 @@ class SDPAAttention:
 class CudaAttention(SDPAAttention):
     """Fused KV writes, paged decode and fused causal chunk attention."""
 
+    def __init__(self, batch, model_input, cache) -> None:
+        super().__init__(batch, model_input, cache)
+
+        query_len = batch.query_lens[0]
+        self.fresh_batch_size = (
+            batch.num_items
+            if batch.num_items > 1
+            and query_len > 1
+            and all(
+                before == 0 and length == query_len
+                for before, length in zip(
+                    batch.context_lens_before,
+                    batch.query_lens,
+                )
+            )
+            else 0
+        )
+
+
     def _make_mask(
         self,
         before: int,
@@ -220,19 +242,47 @@ class CudaAttention(SDPAAttention):
         *,
         scale: float,
     ) -> None:
-        super()._attend(layer_idx, q, k, v, output, scale=scale)
+        if self.fresh_batch_size:
+            batch_size = self.fresh_batch_size
 
-        if self.kv.decode is not None:
-            from tinyvllm.kernels.paged_decode import paged_decode_attention
-
-            paged_decode_attention(
-                q,
-                self.cache,
-                layer_idx,
-                self.kv.decode,
-                output,
-                scale=scale,
+            query, keys, values = (
+                tensor.view(
+                    batch_size,
+                    -1,
+                    *tensor.shape[1:],
+                ).transpose(1, 2)
+                for tensor in (q, k, v)
             )
+
+            attended = F.scaled_dot_product_attention(
+                query,
+                keys,
+                values,
+                dropout_p=0.0,
+                is_causal=True,
+                scale=scale,
+                enable_gqa=q.shape[1] != self.cache.num_kv_heads,
+            )
+
+            output.view(
+                batch_size,
+                -1,
+                *q.shape[1:],
+            ).copy_(attended.transpose(1, 2))
+        else:
+            super()._attend(layer_idx, q, k, v, output, scale=scale)
+
+            if self.kv.decode is not None:
+                from tinyvllm.kernels.paged_decode import paged_decode_attention
+
+                paged_decode_attention(
+                    q,
+                    self.cache,
+                    layer_idx,
+                    self.kv.decode,
+                    output,
+                    scale=scale,
+                )
 
 
 class FlashInferAttention(CudaAttention):

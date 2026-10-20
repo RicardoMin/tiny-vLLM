@@ -22,9 +22,9 @@ class PagedPrefill:
         dtype,
         block_size: int
     ) -> None:
-        if config.head_dim != 128 or block_size != 16:
+        if config.head_dim != 128 or block_size not in (16, 256):
             raise ValueError(
-                "flashinfer currently requires head_dim=128 and block_size=16"
+                "flashinfer currently requires head_dim=128 and block_size in (16, 256)"
             )
 
         try:
@@ -53,6 +53,7 @@ class PagedPrefill:
         self.plan_done = torch.cuda.Event()
         self.planned = False
         self.active = False
+        self.direct = False
 
         self.rows = self.query = self.output = None
         self.wrapper = self.workspace = None
@@ -105,7 +106,7 @@ class PagedPrefill:
             raise RuntimeError("paged prefill is closed")
 
         if self.active:
-            raise RuntimeError("paged prefill step is already acitve")
+            raise RuntimeError("paged prefill step is already active")
 
         if torch.cuda.current_stream(self.device) != self.stream:
             raise RuntimeError("flashinfer runner must stay on its creation stream")
@@ -150,6 +151,10 @@ class PagedPrefill:
             self.plan_done.synchronize()
 
         self._plan((qo_offsets, block_offsets, block_ids, last_lens))
+        self.direct = len(rows) == batch.num_query_tokens
+
+        if self.direct:
+            return
 
         self.rows = torch.tensor(rows, device=self.device, dtype=torch.long)
         shape = (len(rows), self.heads, self.dim)
@@ -173,29 +178,40 @@ class PagedPrefill:
         if torch.cuda.current_stream(self.device) != self.stream:
             raise RuntimeError("one model step must stay on its preparation stream")
 
-        if self.rows is None:
+        if self.rows is None and not self.direct:
             return
 
         if scale != self.scale:
             raise ValueError("attention scale differs from the prefill plan")
 
+        if self.direct and not output.is_contiguous():
+            raise ValueError(
+                "paged prefill requires a contiguous output buffer"
+            )
+
         shape = (cache.num_blocks, self.block_size, self.kv_heads, self.dim)
 
-        torch.index_select(q, 0, self.rows, out=self.query)
+        if self.direct:
+            query, attended = q, output
+        else:
+            torch.index_select(q, 0, self.rows, out=self.query)
+            query, attended = self.query, self.output
 
         self.wrapper.run(
-            self.query,
+            query,
             (cache.key[layer_idx].view(shape), cache.value[layer_idx].view(shape)),
-            out=self.output,
+            out=attended,
             enable_pdl=False,
         )
 
-        output.index_copy_(0, self.rows, self.output)
+        if not self.direct:
+            output.index_copy_(0, self.rows, self.output)
 
 
     def finish(self) -> None:
         # These tensors are allocated and used exclusively on the bound stream.
         self.active = False
+        self.direct = False
         self.rows = self.query = self.output = None
 
 
