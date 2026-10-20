@@ -89,8 +89,18 @@ def main(argv=None) -> None:
     )
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=4)
-    parser.add_argument("--max-num-batched-tokens", type=int, default=256)
-    parser.add_argument("--prefill-chunk-size", type=int, default=128)
+    parser.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=1024,
+        help="Total prefill and decode query-token limit per engine step",
+    )
+    parser.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        default=512,
+        help="Per-request prefill query-token limit per engine step",
+    )
     parser.add_argument("--kv-cache-mib", type=int, default=512)
     args = parser.parse_args(argv)
 
