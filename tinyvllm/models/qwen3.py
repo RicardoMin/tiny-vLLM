@@ -13,6 +13,7 @@ from torch import nn
 from tinyvllm._validation import _check_positive_int
 from tinyvllm.checkpoint import load_weights
 from tinyvllm.runtime.contracts import AttentionBackend
+from tinyvllm.kernels.pointwise import qk_norm_rope
 from tinyvllm.layers import (
     PackedLinear,
     RMSNorm,
@@ -277,30 +278,25 @@ class Qwen3Attention(nn.Module):
             ),
             dim=-1,
         )
+        
+        cos, sin = position_embeddings
 
-        q = self.q_norm(
-            q.view(
-                num_tokens,
-                self.num_heads,
-                self.head_dim,
-            )
+        q, k = qk_norm_rope(
+            q.view(num_tokens, self.num_heads, self.head_dim),
+            k.view(num_tokens, self.num_kv_heads, self.head_dim),
+            self.q_norm.weight,
+            self.k_norm.weight,
+            cos,
+            sin,
+            self.q_norm.eps,
+            self.k_norm.eps,
         )
-        k = self.k_norm(
-            k.view(
-                num_tokens,
-                self.num_kv_heads,
-                self.head_dim,
-            )
-        )
+
         v = v.view(
             num_tokens,
             self.num_kv_heads,
             self.head_dim,
         )
-
-        cos, sin = position_embeddings
-        q = RotaryEmbedding.rotate(q, cos, sin)
-        k = RotaryEmbedding.rotate(k, cos, sin)
 
         output = attention(layer_idx, q, k, v, scale=self.scale)
 

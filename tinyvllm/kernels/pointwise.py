@@ -39,3 +39,28 @@ def apply_rope(
     """Apply half-split RoPE with the original intermediate rounding."""
     load_cuda_kernels()
     return torch.ops.tinyvllm_cuda.apply_rope(x, cos, sin)
+
+
+def qk_norm_rope(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    query_weight: torch.Tensor,
+    key_weight: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    query_eps: float = 1e-6,
+    key_eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize and rotate strided Q/K rows, preserving each rounding step."""
+    load_cuda_kernels()
+
+    return torch.ops.tinyvllm_cuda.qk_norm_rope(
+        query,
+        key,
+        query_weight,
+        key_weight,
+        cos,
+        sin,
+        query_eps,
+        key_eps,
+    )
