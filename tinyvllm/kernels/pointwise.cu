@@ -321,44 +321,6 @@ __global__ void silu_and_mul_kernel(
 }
 
 
-template <typename scalar_t>
-__global__ void apply_rope_kernel(
-    const scalar_t* input,
-    const scalar_t* cos,
-    const scalar_t* sin,
-    scalar_t* output,
-    Rows rows
-) {
-    const int64_t half = rows.width / 2;
-    const int64_t pairs = rows.count * half;
-
-    for (
-        int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
-        index < pairs;
-        index += int64_t(blockDim.x) * gridDim.x
-    ) {
-        const int64_t row = index / half;
-        const int64_t column = index % half;
-        const int64_t token = row / rows.heads;
-
-        const int64_t source = token * rows.token_stride
-            + row % rows.heads * rows.head_stride + column;
-
-        const int64_t target = row * rows.width + column;
-        const int64_t angle = token * half + column;
-
-        const float first = static_cast<float>(input[source]);
-        const float second = static_cast<float>(input[source + half]);
-        const float c = static_cast<float>(cos[angle]);
-        const float s = static_cast<float>(sin[angle]);
-
-        rotate_pair(
-            first, second, c, s, output + target, output + target + half
-        );
-    }
-}
-
-
 template <typename scalar_t, int Width, int Threads>
 __global__ void qk_norm_rope_kernel(
     const scalar_t* query,
@@ -715,53 +677,6 @@ at::Tensor silu_and_mul(const at::Tensor& input) {
 }
 
 
-at::Tensor apply_rope(
-    const at::Tensor& input,
-    const at::Tensor& cos,
-    const at::Tensor& sin
-) {
-    const Rows rows = check_rows(input);
-
-    check_rope_tables(input, cos, sin);
-
-    const c10::cuda::CUDAGuard guard(input.device());
-    auto output = at::empty(input.sizes(), input.options());
-
-    const int64_t pairs = input.numel() / 2;
-    if (pairs == 0) {
-        return output;
-    }
-
-    const auto stream = c10::cuda::getCurrentCUDAStream(
-        input.get_device()
-    );
-    const int blocks = std::min<int64_t>(
-        (pairs + 127) / 128,
-        65535
-    );
-
-    AT_DISPATCH_FLOATING_TYPES_AND2(
-        at::kHalf,
-        at::kBFloat16,
-        input.scalar_type(),
-        "apply_rope",
-        [&] {
-            apply_rope_kernel<scalar_t><<<
-                blocks, 128, 0, stream.stream()
-            >>>(
-                input.data_ptr<scalar_t>(),
-                cos.data_ptr<scalar_t>(),
-                sin.data_ptr<scalar_t>(),
-                output.data_ptr<scalar_t>(),
-                rows
-            );
-        }
-    );
-
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return output;
-}
-
 }   // namespace
 
 
@@ -769,7 +684,6 @@ TORCH_LIBRARY_FRAGMENT(tinyvllm_cuda, m) {
     m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
     m.def("add_rms_norm(Tensor input, Tensor residual, Tensor weight, float eps) -> (Tensor, Tensor)");
     m.def("silu_and_mul(Tensor input) -> Tensor");
-    m.def("apply_rope(Tensor input, Tensor cos, Tensor sin) -> Tensor");
     m.def(
         "qk_norm_rope(Tensor query, Tensor key, Tensor query_weight, "
         "Tensor key_weight, Tensor cos, Tensor sin, float query_eps, "
@@ -782,6 +696,5 @@ TORCH_LIBRARY_IMPL(tinyvllm_cuda, CUDA, m) {
     m.impl("rms_norm", &rms_norm);
     m.impl("add_rms_norm", &add_rms_norm);
     m.impl("silu_and_mul", &silu_and_mul);
-    m.impl("apply_rope", &apply_rope);
     m.impl("qk_norm_rope", &qk_norm_rope);
 }

@@ -115,13 +115,13 @@ class PreparedBatch:
     sample_request_ids: tuple[int, ...]
     sampling_params: tuple[SamplingParams, ...]
 
-    kv_block_size: int = 0
-    kv_num_blocks: int = 0
-    kv_block_table_ids: tuple[int, ...] = ()
-    kv_block_table_offsets: tuple[int, ...] = ()
-    kv_slot_mapping: tuple[int, ...] = ()
+    kv_block_size: int
+    kv_num_blocks: int
+    kv_block_table_ids: tuple[int, ...]
+    kv_block_table_offsets: tuple[int, ...]
+    kv_slot_mapping: tuple[int, ...]
 
-    request_ids: tuple[int, ...] = ()
+    request_ids: tuple[int, ...]
 
 
     @property
@@ -135,10 +135,6 @@ class PreparedBatch:
     @property
     def num_samples(self) -> int:
         return len(self.sample_token_indices)
-
-    @property
-    def has_kv_metadata(self) -> bool:
-        return bool(self.kv_block_table_offsets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,12 +230,10 @@ class BatchBuilder:
 
             if item.context_len_before != item.token_start:
                 raise ValueError("context length must match append start")
-            kv.validate_append(item.request_id, item.token_start, item.query_len)
-            block_table = kv.staged_block_table(
-                item.request_id
-            )
-            slot_mapping = kv.slot_mapping(
-                item.request_id
+            block_table, slot_mapping = kv.append_metadata(
+                item.request_id,
+                item.token_start,
+                item.query_len,
             )
 
             kv_block_table_ids.extend(

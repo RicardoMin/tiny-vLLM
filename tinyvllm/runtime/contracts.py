@@ -62,8 +62,8 @@ class ModelInput:
         paged_prefill: bool = False,
     ) -> 'ModelInput':
         """Lower an already validated CPU batch once, not once per layer."""
-        if not batch.has_kv_metadata or batch.kv_block_size <= 0:
-            raise ValueError("model input requires paged KV metadata")
+        if batch.kv_block_size <= 0:
+            raise ValueError("KV block size must be positive")
 
         if paged_prefill and not paged_decode:
             raise ValueError("paged prefill requires CUDA decode metadata")

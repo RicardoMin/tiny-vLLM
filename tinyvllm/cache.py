@@ -295,12 +295,13 @@ class BlockPlanTxn:
     def num_blocks(self) -> int:
         return self._manager.pool.num_blocks
 
-    def validate_append(
+    def append_metadata(
         self,
         request_id: int,
         token_start: int,
         query_len: int,
-    ) -> None:
+    ) -> tuple[tuple[BlockRef, ...], tuple[int, ...]]:
+        """Read one staged append's table and slots under the same contract."""
         self._ensure_metadata_readable()
         if (
             request_id not in self._token_ends
@@ -308,6 +309,8 @@ class BlockPlanTxn:
             or len(self._slot_mappings[request_id]) != query_len
         ):
             raise ValueError("work item does not match its KV append")
+
+        return self._block_tables[request_id], self._slot_mappings[request_id]
 
     def _ensure_metadata_readable(self) -> None:
         if self._state not in (
@@ -319,17 +322,6 @@ class BlockPlanTxn:
             )
 
 
-    def staged_block_table(
-        self,
-        request_id: int,
-    ) -> tuple[BlockRef, ...]:
-        self._ensure_metadata_readable()
-        return self._block_tables[request_id]
-
-    def slot_mapping(self, request_id: int) -> tuple[int, ...]:
-        self._ensure_metadata_readable()
-        return self._slot_mappings[request_id]
-
     def commit_before_dispatch(self) -> None:
         self._manager._commit_before_dispatch(self)
 
@@ -338,9 +330,6 @@ class BlockPlanTxn:
 
     def rollback(self) -> None:
         self._manager._rollback(self)
-
-    def fail(self) -> None:
-        self._manager._fail(self)
 
 
 class BlockManager:
@@ -682,12 +671,6 @@ class BlockManager:
 
         txn._state = BlockTxnState.ROLLED_BACK
         self._open_txn = None
-
-
-    def _fail(self, txn: BlockPlanTxn) -> None:
-        if txn.state not in (BlockTxnState.DISPATCHED, BlockTxnState.COMMITTED):
-            raise ValueError("KV transaction must be dispatched or committed")
-        self.teardown(txn)
 
 
     def _require_open(

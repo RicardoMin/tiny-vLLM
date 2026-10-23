@@ -273,29 +273,12 @@ class Scheduler:
         return self._requests[request_id]
 
 
-    def consume_finished(
-        self,
-        max_items: int | None = None,
-    ) -> tuple[CompletionEvent, ...]:
-        if max_items is not None:
-            _check_non_negative_int("max_items", max_items)
-
-            if max_items == 0:
-                return ()
-
-        count = len(self._completion_events)
-
-        if max_items is not None:
-            count = min(count, max_items)
-
-        events: list[CompletionEvent] = []
-
-        for _ in range(count):
-            event = self._completion_events.popleft()
+    def consume_finished(self) -> tuple[CompletionEvent, ...]:
+        events = tuple(self._completion_events)
+        for event in events:
             del self._requests[event.request_id]
-            events.append(event)
-
-        return tuple(events)
+        self._completion_events.clear()
+        return events
 
 
     def apply_commands(
@@ -636,7 +619,7 @@ class Scheduler:
         txn: ScheduleTxn,
         result: StepResult,
         now_ns: int,
-    ) -> tuple[int, ...]:
+    ) -> None:
         self._require_open_txn(txn, TxnState.DISPATCHED)
 
         try:
@@ -662,7 +645,6 @@ class Scheduler:
             txn.kv.complete_writes()
 
             sample_index = 0
-            finished_ids: list[int] = []
 
             for item in plan.items:
                 request = self._requests[item.request_id]
@@ -700,7 +682,6 @@ class Scheduler:
                         request,
                         now_ns,
                     )
-                    finished_ids.append(request.request_id)
                 else:
                     self._decode_ids.append(request.request_id)
 
@@ -716,7 +697,6 @@ class Scheduler:
         self._now_ns = now_ns
         object.__setattr__(txn, "state", TxnState.COMMITTED)
         self._open_txn = None
-        return tuple(finished_ids)
 
 
     def fail_step(self, txn: ScheduleTxn) -> None:

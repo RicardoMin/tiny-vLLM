@@ -13,7 +13,6 @@ from tinyvllm.kernels.pointwise import (
     add_rms_norm,
     rms_norm, 
     silu_and_mul, 
-    apply_rope,
 )
 
 
@@ -244,15 +243,6 @@ class RotaryEmbedding(nn.Module):
         ).to(dtype).unsqueeze(1)
 
         return cos, sin
-
-
-    @staticmethod
-    def rotate(
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        return apply_rope(x, cos, sin)
 
 
 class SiluAndMul(nn.Module):
