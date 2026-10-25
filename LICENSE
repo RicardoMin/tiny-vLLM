@@ -1,88 +1,202 @@
-# Licensing a repository
 
-Public repositories on GitHub are often used to share open source software. For your repository to truly be open source, you'll need to license it so that others are free to use, change, and distribute the software.
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
 
-## Choosing the right license
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
-We created [choosealicense.com](https://choosealicense.com), to help you understand how to license your code. A software license tells others what they can and can't do with your source code, so it's important to make an informed decision.
+   1. Definitions.
 
-You're under no obligation to choose a license. However, without a license, the default copyright laws apply, meaning that you retain all rights to your source code and no one may reproduce, distribute, or create derivative works from your work. If you're creating an open source project, we strongly encourage you to include an open source license. The [Open Source Guide](https://opensource.guide/legal/#which-open-source-license-is-appropriate-for-my-project) provides additional guidance on choosing the correct license for your project.
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
 
-> [!NOTE]
-> If you publish your source code in a public repository on GitHub, according to the [Terms of Service](/en/site-policy/github-terms/github-terms-of-service), other users of GitHub.com have the right to view and fork your repository. If you have already created a repository and no longer want users to have access to the repository, you can make the repository private. When you change the visibility of a repository to private, existing forks or local copies created by other users will still exist. For more information, see [Setting repository visibility](/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility).
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
 
-## Determining the location of your license
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
 
-Most people place their license text in a file named `LICENSE.txt` (or `LICENSE.md` or `LICENSE.rst`) in the root of the repository; [here's an example from Hubot](https://github.com/hubotio/hubot/blob/main/LICENSE.md).
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
 
-Some projects include information about their license in their README. For example, a project's README may include a note saying "This project is licensed under the terms of the MIT license."
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
 
-As a best practice, we encourage you to include the license file with your project.
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
 
-## Searching GitHub by license type
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
 
-You can filter repositories based on their license or license family using the `license` qualifier and the exact license keyword.
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
 
-| License                                         | License keyword      |
-| ----------------------------------------------- | -------------------- |
-| Academic Free License v3.0                      | `AFL-3.0`            |
-| Apache license 2.0                              | `Apache-2.0`         |
-| Artistic license 2.0                            | `Artistic-2.0`       |
-| Boost Software License 1.0                      | `BSL-1.0`            |
-| BSD 2-clause "Simplified" license               | `BSD-2-Clause`       |
-| BSD 3-clause "New" or "Revised" license         | `BSD-3-Clause`       |
-| BSD 3-clause Clear license                      | `BSD-3-Clause-Clear` |
-| BSD 4-clause "Original" or "Old" license        | `BSD-4-Clause`       |
-| BSD Zero-Clause license                         | `0BSD`               |
-| Creative Commons license family                 | `CC`                 |
-| Creative Commons Zero v1.0 Universal            | `CC0-1.0`            |
-| Creative Commons Attribution 4.0                | `CC-BY-4.0`          |
-| Creative Commons Attribution ShareAlike 4.0     | `CC-BY-SA-4.0`       |
-| Do What The F\*ck You Want To Public License    | `WTFPL`              |
-| Educational Community License v2.0              | `ECL-2.0`            |
-| Eclipse Public License 1.0                      | `EPL-1.0`            |
-| Eclipse Public License 2.0                      | `EPL-2.0`            |
-| European Union Public License 1.1               | `EUPL-1.1`           |
-| GNU Affero General Public License v3.0          | `AGPL-3.0`           |
-| GNU General Public License family               | `GPL`                |
-| GNU General Public License v2.0                 | `GPL-2.0`            |
-| GNU General Public License v3.0                 | `GPL-3.0`            |
-| GNU Lesser General Public License family        | `LGPL`               |
-| GNU Lesser General Public License v2.1          | `LGPL-2.1`           |
-| GNU Lesser General Public License v3.0          | `LGPL-3.0`           |
-| ISC                                             | `ISC`                |
-| LaTeX Project Public License v1.3c              | `LPPL-1.3c`          |
-| Microsoft Public License                        | `MS-PL`              |
-| MIT                                             | `MIT`                |
-| Mozilla Public License 2.0                      | `MPL-2.0`            |
-| Open Software License 3.0                       | `OSL-3.0`            |
-| PostgreSQL License                              | `PostgreSQL`         |
-| SIL Open Font License 1.1                       | `OFL-1.1`            |
-| University of Illinois/NCSA Open Source License | `NCSA`               |
-| The Unlicense                                   | `Unlicense`          |
-| zLib License                                    | `Zlib`               |
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
 
-When you search by a family license, your results will include all licenses in that family. For example, when you use the query `license:gpl`, your results will include repositories licensed under GNU General Public License v2.0 and GNU General Public License v3.0. For more information, see [Searching for repositories](/en/search-github/searching-on-github/searching-for-repositories#search-by-license).
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
 
-## Detecting a license
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
 
-[The open source Ruby gem Licensee](https://github.com/licensee/licensee) compares the repository's *LICENSE* file to a short list of known licenses. Licensee also provides the [Licenses API](/en/rest/licenses) and [gives us insight into how repositories on GitHub are licensed](https://github.com/blog/1964-open-source-license-usage-on-github-com). If your repository is using a license that isn't listed on the [Choose a License website](https://choosealicense.com/appendix/), you can [request including the license](https://github.com/github/choosealicense.com/blob/gh-pages/CONTRIBUTING.md#adding-a-license).
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
 
-If your repository is using a license that is listed on the Choose a License website and it's not displaying clearly at the top of the repository page, it may contain multiple licenses or other complexity. To have your license detected, simplify your *LICENSE* file and note the complexity somewhere else, such as your repository's *README* file.
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
 
-## Applying a license to a repository with an existing license
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
 
-The license picker is only available when you create a new project on GitHub.
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
 
-![Screenshot the "Choose a license" section of the new repository page, including a dropdown menu labeled "License."](/assets/images/help/repository/repository-license-picker.png)
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
 
-You can manually add a license using the browser. For more information on adding a license to a repository, see [Adding a license to a repository](/en/communities/setting-up-your-project-for-healthy-contributions/adding-a-license-to-a-repository).
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
 
-## Disclaimer
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
 
-The goal of GitHub's open source licensing efforts is to provide a starting point to help you make an informed choice. GitHub displays license information to help users get information about open source licenses and the projects that use them. We hope it helps, but please keep in mind that we’re not lawyers and that we make mistakes like everyone else. For that reason, GitHub provides the information on an "as-is" basis and makes no warranties regarding any information or licenses provided on or through it, and disclaims liability for damages resulting from using the license information. If you have any questions regarding the right license for your code or any other legal issues relating to it, it’s always best to consult with a professional.
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
 
-## Further reading
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
 
-* The Open Source Guides' section [The Legal Side of Open Source](https://opensource.guide/legal/)
-* [GitHub Skills](https://skills.github.com/)
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
