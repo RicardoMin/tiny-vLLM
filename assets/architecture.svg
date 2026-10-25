@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title description">
+  <title id="title">tiny-vllm architecture</title>
+  <desc id="description">Python, CLI and HTTP requests pass through text APIs into a single-owner engine, then the scheduler and executor. Synchronous LLM calls the engine directly; asynchronous requests use AsyncEngine. Prefix caching and paged KV support scheduling; CUDA graphs replay eligible decode batches. The engine commits results and emits events for text and streaming output.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f8ff"/>
+      <stop offset="1" stop-color="#f4fbfc"/>
+    </linearGradient>
+    <linearGradient id="headline" x1="0" x2="1">
+      <stop stop-color="#3558d4"/><stop offset="1" stop-color="#7a4ddd"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-25%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#24375d" flood-opacity="0.055"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 Z" fill="#8190ad"/>
+    </marker>
+    <style>
+      text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+      .label { font-size: 11px; font-weight: 700; letter-spacing: 1.7px; }
+      .title { font-size: 22px; font-weight: 700; fill: #172743; }
+      .body { font-size: 16px; fill: #536581; }
+      .edge { fill: none; stroke: #8190ad; stroke-width: 2; marker-end: url(#arrow); }
+      .caption { font-size: 12px; font-weight: 600; fill: #657693; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="1278" height="758" rx="26" fill="url(#background)" stroke="#e2e9f2"/>
+  <rect x="48" y="43" width="5" height="58" rx="2.5" fill="url(#headline)"/>
+  <text x="70" y="65" font-size="14" font-weight="750" letter-spacing="2.5" fill="#5270b0">TINY-VLLM</text>
+  <text x="70" y="101" font-size="30" font-weight="750" fill="#142440">One engine. Every request.</text>
+  <rect x="1022" y="53" width="210" height="37" rx="18.5" fill="#e9edff" stroke="#dce3fc"/>
+  <circle cx="1042" cy="71.5" r="4" fill="#6576d5"/>
+  <text x="1057" y="77" font-size="13" font-weight="700" fill="#4b5aa7">SINGLE GPU · QWEN3</text>
+  <text x="70" y="133" font-size="16" fill="#6a7c98">Continuous batching · Paged attention · Prefix reuse · CUDA graph replay</text>
+
+<g transform="translate(48 181)">
+<rect width="300" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#52698f"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#eef2f8"/>
+<g transform="translate(28 26)" fill="none" stroke="#52698f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="2" width="20" height="17" rx="3"/><path d="m5 7 3 3-3 3m6 0h5"/></g>
+<text x="68" y="42" class="label" fill="#52698f">REQUESTS</text>
+<text x="22" y="84" class="title">Python · CLI · HTTP</text>
+<text x="22" y="112" class="body">Local generation and chat</text>
+<text x="22" y="137" class="body">Concurrent HTTP / SSE requests</text>
+</g>
+<g transform="translate(460 181)">
+<rect width="328" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#4265d6"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#eef1ff"/>
+<g transform="translate(28 26)" fill="none" stroke="#4265d6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h16M11 3v16M7 19h8M4 7V3m14 4V3"/></g>
+<text x="68" y="42" class="label" fill="#4265d6">TEXT LAYER</text>
+<text x="22" y="84" class="title">LLM / AsyncLLM</text>
+<text x="22" y="112" class="body">Tokenization and chat templates</text>
+<text x="22" y="137" class="body">Sync calls or async request streams</text>
+</g>
+<g transform="translate(900 181)">
+<rect width="332" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#8454cf"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#f4edff"/>
+<g transform="translate(28 26)" fill="none" stroke="#8454cf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="12" height="12" rx="3"/><path d="M8 1v4m6-4v4M8 17v4m6-4v4M1 8h4m-4 6h4m12-6h4m-4 6h4"/></g>
+<text x="68" y="42" class="label" fill="#8454cf">LIFECYCLE</text>
+<text x="22" y="84" class="title">Engine</text>
+<text x="22" y="112" class="body">Submit · commit · cancel · finish</text>
+<text x="22" y="137" class="body">One execution owner per engine</text>
+</g>
+<g transform="translate(900 421)">
+<rect width="332" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#159388"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#e8f8f3"/>
+<g transform="translate(28 26)" fill="none" stroke="#159388" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="5" height="5" rx="1"/><rect x="10" y="3" width="10" height="5" rx="1"/><rect x="2" y="12" width="11" height="5" rx="1"/><rect x="16" y="12" width="4" height="5" rx="1"/></g>
+<text x="68" y="42" class="label" fill="#159388">BATCHING</text>
+<text x="22" y="84" class="title">Scheduler</text>
+<text x="22" y="112" class="body">Chunked prefill + continuous decode</text>
+<text x="22" y="137" class="body">One mixed batch, including batch = 1</text>
+</g>
+<g transform="translate(460 421)">
+<rect width="328" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#c97828"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#fff2e3"/>
+<g transform="translate(28 26)" fill="none" stroke="#c97828" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 1-8 11h7l-1 9 8-12h-7Z"/></g>
+<text x="68" y="42" class="label" fill="#c97828">GPU EXECUTION</text>
+<text x="22" y="84" class="title">Executor → Qwen3</text>
+<text x="22" y="112" class="body">Runner · attention · CUDA kernels</text>
+<text x="22" y="137" class="body">Batched sampling</text>
+</g>
+<g transform="translate(48 421)">
+<rect width="300" height="164" rx="17" fill="#fff" stroke="#dfe6f0" filter="url(#shadow)"/>
+<rect x="0" y="17" width="4" height="130" rx="2" fill="#b6568c"/>
+<rect x="22" y="20" width="34" height="34" rx="10" fill="#fcedf5"/>
+<g transform="translate(28 26)" fill="none" stroke="#b6568c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9l-5 4v-4H3a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/><path d="M6 7h10M6 11h6"/></g>
+<text x="68" y="42" class="label" fill="#b6568c">RESPONSE</text>
+<text x="22" y="84" class="title">Text and token output</text>
+<text x="22" y="112" class="body">Incremental text decoding</text>
+<text x="22" y="137" class="body">Python results · terminal · SSE</text>
+</g>
+<path class="edge" d="M348 262H450"/>
+<text x="399" y="249" class="caption" text-anchor="middle">prompts</text>
+<path class="edge" d="M788 240H890"/>
+<text x="844" y="226" class="caption" text-anchor="middle">sync direct</text>
+<path class="edge" d="M788 296H890"/>
+<text x="844" y="281" class="caption" text-anchor="middle">AsyncEngine</text>
+<path class="edge" d="M1066 345V410"/>
+<text x="1080" y="383" class="caption">plan / commit</text>
+<path class="edge" d="M900 500H798"/>
+<text x="844" y="485" class="caption" text-anchor="middle">batch</text>
+<path class="edge" d="M460 500H358"/>
+<text x="404" y="477" class="caption" text-anchor="middle">Engine commits</text>
+<text x="404" y="491" class="caption" text-anchor="middle">and emits events</text>
+<path class="edge" d="M624 636V595"/>
+<path class="edge" d="M1066 636V595"/>
+<rect x="460" y="638" width="328" height="79" rx="14" fill="#fff3e7" stroke="#f1dcc5"/>
+<text x="482" y="668" font-size="17" font-weight="700" fill="#ad6826">Decode CUDA graphs</text>
+<text x="482" y="693" font-size="14" fill="#8b745d">Padded buckets · eager fallback</text>
+<rect x="900" y="638" width="332" height="79" rx="14" fill="#e9f7f2" stroke="#cbe8db"/>
+<text x="922" y="668" font-size="17" font-weight="700" fill="#187e65">Prefix cache + paged KV</text>
+<text x="922" y="693" font-size="14" fill="#537d6d">Shared blocks · refcounts · LRU eviction</text>
+<text x="70" y="670" font-size="13" font-weight="700" fill="#8390a6" letter-spacing="1.5">ONE CORE, TWO ENTRY PATHS</text>
+<text x="70" y="697" font-size="14" fill="#72829b">Direct sync calls or an async GPU bridge.</text>
+</svg>
