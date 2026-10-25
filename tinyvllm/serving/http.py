@@ -13,6 +13,7 @@ from aiohttp import web
 
 from tinyvllm.async_engine import (
     OverloadedError,
+    RequestRejectedError,
     SlowConsumerError,
 )
 from tinyvllm.config import EngineConfig
@@ -358,6 +359,8 @@ class _Server:
                 "request body exceeds 1 MiB",
                 "invalid_request",
             )
+        except RequestRejectedError as error:
+            status, failure = 400, _error(str(error), "invalid_request")
         except OverloadedError as error:
             status, failure = 429, _error(str(error), "overloaded")
         except TimeoutError:

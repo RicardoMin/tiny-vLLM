@@ -17,12 +17,13 @@ from tinyvllm.sampling import TorchSampler
 
 @dataclass(frozen=True, slots=True)
 class ExecutorCapabilities:
-    """Model geometry and vocabulary constraints required by the scheduler."""
+    """Model geometry and execution limits required by the scheduler."""
 
     vocab_size: int | None = None
     max_model_len: int | None = None
     kv_block_size: int | None = None
     kv_num_blocks: int | None = None
+    max_batch_size: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -30,6 +31,7 @@ class ExecutorCapabilities:
             "max_model_len",
             "kv_block_size",
             "kv_num_blocks",
+            "max_batch_size",
         ):
             value = getattr(self, name)
 
@@ -43,6 +45,7 @@ class ExecutorCapabilities:
         max_model_len: int,
         block_size: int,
         num_blocks: int,
+        max_batch_size: int,
     ) -> None:
         if (
             self.max_model_len is not None
@@ -50,6 +53,14 @@ class ExecutorCapabilities:
         ):
             raise ValueError(
                 "scheduler max_model_len exceeds executor capacity"
+            )
+
+        if (
+            self.max_batch_size is not None
+            and max_batch_size > self.max_batch_size
+        ):
+            raise ValueError(
+                "scheduler maximum step batch exceeds executor capacity"
             )
 
         for name, actual, expected in (
@@ -97,6 +108,11 @@ class Executor:
             max_model_len=self.runner.max_model_len,
             kv_block_size=block_size,
             kv_num_blocks=num_blocks,
+            max_batch_size=(
+                self.runner.decode_inputs.capacity
+                if self.runner.decode_inputs is not None
+                else None
+            ),
         )
 
         self.sampler = (

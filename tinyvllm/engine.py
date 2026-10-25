@@ -135,6 +135,10 @@ class Engine:
             max_model_len=scheduler.max_model_len,
             block_size=scheduler.kv_block_size,
             num_blocks=scheduler.block_manager.pool.num_blocks,
+            max_batch_size=min(
+                scheduler.max_step_requests,
+                scheduler.max_scheduled_tokens,
+            ),
         )
         executor.capabilities.validate_token_ids(
             scheduler.eos_token_ids

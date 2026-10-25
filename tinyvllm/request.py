@@ -48,14 +48,20 @@ class SamplingParams:
 
         if type(self.temperature) not in (int, float):
             raise TypeError("temperature must be a number")
-        temperature = float(self.temperature)
+        try:
+            temperature = float(self.temperature)
+        except OverflowError:
+            raise ValueError("temperature must be finite and non-negative") from None
         if not math.isfinite(temperature) or temperature < 0.0:
             raise ValueError("temperature must be finite and non-negative")
         object.__setattr__(self, "temperature", temperature)
 
         if type(self.top_p) not in (int, float):
             raise TypeError("top_p must be a number")
-        top_p = float(self.top_p)
+        try:
+            top_p = float(self.top_p)
+        except OverflowError:
+            raise ValueError("top_p must be in (0, 1]") from None
         if not math.isfinite(top_p) or not 0.0 < top_p <= 1.0:
             raise ValueError("top_p must be in (0, 1]")
         object.__setattr__(self, "top_p", top_p)

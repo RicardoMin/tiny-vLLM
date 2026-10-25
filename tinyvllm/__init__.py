@@ -20,6 +20,7 @@ from tinyvllm.serving.async_llm import AsyncLLM, TextDelta
 from tinyvllm.async_engine import (
     AsyncEngine,
     OverloadedError,
+    RequestRejectedError,
     RequestStream,
     SlowConsumerError,
     WorkerError,
@@ -28,6 +29,7 @@ from tinyvllm.async_engine import (
 __all__ = [
     "AsyncEngine",
     "OverloadedError",
+    "RequestRejectedError",
     "RequestStream",
     "SlowConsumerError",
     "WorkerError",

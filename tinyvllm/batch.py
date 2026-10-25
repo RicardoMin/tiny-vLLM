@@ -101,7 +101,6 @@ class StepPlan:
 class PreparedBatch:
     plan_id: int
     mode: StepMode
-    num_decode_items: int
 
     input_ids: tuple[int, ...]
     positions: tuple[int, ...]
@@ -271,7 +270,6 @@ class BatchBuilder:
         return PreparedBatch(
             plan_id=plan.plan_id,
             mode=plan.mode,
-            num_decode_items=plan.num_decode_items,
             input_ids=tuple(input_ids),
             positions=tuple(positions),
             q_offsets=tuple(q_offsets),

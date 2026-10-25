@@ -15,6 +15,10 @@ from tinyvllm.engine import Engine, TokenEvent
 from tinyvllm.request import CompletionEvent, SamplingParams
 
 
+class RequestRejectedError(ValueError):
+    """The engine rejected one request during submission validation."""
+
+
 class OverloadedError(RuntimeError):
     pass
 
@@ -314,8 +318,7 @@ class AsyncEngine:
                         )
                     except (TypeError, ValueError) as error:
                         with self._condition:
-                            error_type = TypeError if isinstance(error, TypeError) else ValueError
-                            self._fail(slot, error_type, str(error))
+                            self._fail(slot, RequestRejectedError, str(error))
                             slot.retired = True
                             self._retire(slot)
                     finally:
